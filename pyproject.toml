@@ -6,8 +6,11 @@ authors = [
     {name = "Your Name",email = "you@example.com"}
 ]
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<4.0"
 dependencies = [
+    "telethon (>=1.39.0,<2.0.0)",
+    "qrcode (>=8.0,<9.0)",
+    "pillow (>=11.1.0,<12.0.0)"
 ]
 
 

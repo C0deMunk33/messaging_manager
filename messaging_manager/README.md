@@ -5,6 +5,7 @@ Notes:
 OK:
 - Slack API would work with proper app permissions
 - Telegram: Client API would work, requires you do a phone auth at runtime?
+    QR code login path
 - Gmail
 - outlook
 
