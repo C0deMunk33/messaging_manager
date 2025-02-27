@@ -3,6 +3,8 @@ from telethon import TelegramClient
 from qrcode import QRCode
 import os
 import dotenv
+import uuid
+from messaging_manager.libs.service_mapper_interface import UnifiedMessageFormat
 
 qr = QRCode()
 
@@ -58,13 +60,13 @@ async def login(client: telethon.TelegramClient):
         # Do whatever you need with the authorized session
         me = await client.get_me()
         print(f"Logged in as: {me.first_name} (@{me.username})")
-        return True
+        return me
     
     # If we're not authorized, proceed with QR login
     print("No valid session found. Starting QR login...")
     qr_login = await client.qr_login()
     print(f"Connected: {client.is_connected()}")
-    
+    # TODO: redirect qr code to whatever UI is being used
     r = False
     while not r:
         display_url_as_qr(qr_login.url)
@@ -75,16 +77,64 @@ async def login(client: telethon.TelegramClient):
                 me = await client.get_me()
                 print(f"Successfully logged in as: {me.first_name} (@{me.username})")
                 # After successful login, show chats
+                return me
         except Exception as e:
             print(f"Waiting for login... ({e})")
             await qr_login.recreate()
 
-    await show_chats(client)
-    return r
+    return None
+
+async def get_chats(client: telethon.TelegramClient, limit: int=3):
+    chats = []
+    async for dialog in client.iter_dialogs(limit=limit):
+        if dialog.name is None or dialog.name == "":
+            continue
+        chats.append(dialog)
+    return chats
+
+async def get_messages(client: telethon.TelegramClient, me, chats: list, latest_message_id: int=0):
+    messages = []
+    print("~" * 100)
+    print(me)
+    print("~" * 100)
+    my_id = me.id
+    for chat in chats:
+        async for message in client.iter_messages(entity=chat.message.peer_id, limit=5, min_id=latest_message_id):
+            from_id = message.peer_id.user_id
+            if message.from_id is not None:
+                from_id = message.from_id.user_id
+
+            sender_name = chat.name
+            print("~" * 100)
+            print(from_id)
+            print(my_id)
+            print("~" * 100)
+
+            if from_id == my_id:
+                sender_name = f"Me"
+
+            messages.append(UnifiedMessageFormat(
+                message_id=str(uuid.uuid4()),
+                service_name="telegram",
+                source_keys={"peer_id": str(chat.message.peer_id.user_id), "message_id": str(message.id)},
+                message_content=message.message,
+                sender_id=str(from_id),
+                sender_name=sender_name,
+                message_timestamp=message.date,
+                file_paths=[] # TODO: add file paths
+            ))
+
+    return messages
 
 async def main(client: telethon.TelegramClient):
-    await login(client)
-    await show_chats(client)
+    me = await login(client)
+    # await show_chats(client)
+    chats = await get_chats(client, limit=2)
+    messages = await get_messages(client, me, chats)
+    for message in messages:
+        print("~" * 100)
+        print(message.model_dump_json(indent=4))
+        print("~" * 100)
     #await test_reply(client)
 
 # Load environment variables from .env
