@@ -22,13 +22,14 @@ def display_url_as_qr(url):
     gen_qr(url)
 
 class TelegramServiceMapper(ServiceMapperInterface):
-    def __init__(self, init_keys: dict[str, str], session_name: str = None):
+    def __init__(self, init_keys: dict[str, str], session_name: str = None, media_dir: str = None):
         super().__init__()
         # hash the init keys
         self.session_name = session_name
         self.latest_message_id = 0
         self.client = None
         self.init_keys = init_keys
+        self.media_dir = media_dir
         self.client = telethon.TelegramClient(session=self.session_name, api_id=self.init_keys['api_id'], api_hash=self.init_keys['api_hash'])
 
     async def login(self) -> bool:
@@ -75,6 +76,7 @@ class TelegramServiceMapper(ServiceMapperInterface):
             if dialog.name is None or dialog.name == "":
                 continue
             async for message in self.client.iter_messages(entity=dialog.message.peer_id, limit=limit_per_source, min_id=min_id):
+                generated_message_id = hashlib.sha256((str(message.id) + "telegram").encode()).hexdigest()
                 from_id = message.peer_id.user_id
                 if message.from_id is not None:
                     from_id = message.from_id.user_id
@@ -83,77 +85,54 @@ class TelegramServiceMapper(ServiceMapperInterface):
                
                 if from_id == me.id:
                     sender_name = "user"
-                print("~" * 100)
-                print(message)
-                print("~" * 100)
-                #TODO  if message media get url, type, site_name, title, description, send image to ollama?
+                # notes:
                 # reddit links preview
                 # X links don't preview, or at least not always
+                # only one media per message, when you send multiple files in telegram, each file is a new message. the caption is attached to the first message as .message .
+                file_paths = []
+                final_message = ""
+                # if media dir already exists, skip
+                media_downloaded = False
+                media_dir = os.path.join(self.media_dir, str(generated_message_id))
 
-                if message.media:
-                    print(f"type of media: {type(message.media)}")
-                    print("~" * 100)
-                    """type of media: <class 'telethon.tl.types.MessageMediaWebPage'>
-.webpage.url
-.webpage.description
-.webpage.photo # figure this out. the type is Photo
+                if os.path.exists(media_dir):
+                    media_downloaded = True
 
-type of media: <class 'telethon.tl.types.MessageMediaPhoto'>
-.photo
-
-type of media: <class 'telethon.tl.types.MessageMediaDocument'>
-.document.mime_type
-.document.file_reference
-# find way to get .document
-
-example:
-path = await client.download_media(message)
-await client.download_media(message, filename)
-# or
-path = await message.download_media()
-await message.download_media(filename)
-
-# Downloading to memory
-blob = await client.download_media(message, bytes)
-
-# Printing download progress
-def callback(current, total):
-    print('Downloaded', current, 'out of', total,
-          'bytes: {:.2%}'.format(current / total))
-
-await client.download_media(message, progress_callback=callback)
-
-MessageMediaContact	
-MessageMediaDice
-MessageMediaDocument	
-MessageMediaEmpty
-MessageMediaGame	
-MessageMediaGeo
-MessageMediaGeoLive	
-MessageMediaGiveaway
-MessageMediaGiveawayResults	
-MessageMediaInvoice
-MessageMediaPaidMedia	
-MessageMediaPhoto
-MessageMediaPoll	
-MessageMediaStory
-MessageMediaUnsupported	
-MessageMediaVenue
-MessageMediaWebPage
-"""
-
+                if message.media and not media_downloaded:
+                    # create folder for media
+                    if not os.path.exists(media_dir):
+                        os.makedirs(media_dir)
+                    media_type = type(message.media)
+                    if media_type == telethon.tl.types.MessageMediaWebPage:
+                        final_message = f"shared a webpage: {message.media.webpage.url}\n"
+                        final_message += f"description: {message.media.webpage.description}\n\n"
+                        final_message += f"comment: {message.message}"
+                        # TODO: scrape page
+                    elif media_type == telethon.tl.types.MessageMediaPhoto:
+                        # download media
+                        await message.download_media(media_dir)
+                    elif media_type == telethon.tl.types.MessageMediaDocument:
+                        await message.download_media(media_dir)
+                    
+                    media_downloaded = True
+                else:
+                    final_message = message.message
+                # get file paths for each file in media_dir
+                if media_downloaded:
+                    for file in os.listdir(media_dir):
+                        file_paths.append(os.path.join(media_dir, file))
 
                 source_id = get_source_id(dialog.message.peer_id.user_id)
                 result_message = UnifiedMessageFormat(
-                    message_id=str(uuid.uuid4()),
+                    message_id=generated_message_id,
                     service_name="telegram",
                     source_id=source_id,
                     source_keys={"peer_id": str(dialog.message.peer_id.user_id), "message_id": str(message.id)},
-                    message_content=message.message, # todo: add media.
+                    message_content=final_message,
                     sender_id=str(from_id),
                     sender_name=sender_name,
                     message_timestamp=message.date,
-                    file_paths=[] # TODO: add file paths
+                    file_paths=file_paths
                 )
                 results.append(result_message)
 

@@ -1,5 +1,9 @@
 *.session
-
+*.session-journal
+media/
+*.db
+*.db-journal
+*.db-lock
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
