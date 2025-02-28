@@ -40,6 +40,24 @@ def call_ollama_chat(server_url, model, messages, json_schema=None, temperature=
         print("~~~~~~~~~~~~~~~~~~~~~~~")
         return error
     
+def call_ollama_vision(server_url, model,  messages, json_schema=None, temperature=None, tools=None):
+    client = Client(
+        host=server_url
+    )
+
+    response = client.chat(
+        model="minicpm-v",
+        messages=[m.chat_ml() for m in messages],
+        format=json_schema,
+        tools=tools,
+        options={
+            'num_ctx':10000,
+            'seed': random.randint(0, 1000000)
+        }
+    )
+
+    return response.message.content
+
 def embed_with_ollama(server_url, text, model="nomic-embed-text"):
     client = Client(
         host=server_url
@@ -71,9 +89,17 @@ class ToolsetDetails(BaseModel):
 class Message(BaseModel):
     role: str
     content: Optional[str] = None
+    images: Optional[List[str]] = None
     tool_calls: Optional[List[ToolCall]] = None
     
     def chat_ml(self):
+
+        result = {
+            "role": self.role
+        }
+        if self.content is not None:
+            result["content"] = self.content
+
         if self.tool_calls is not None and len(self.tool_calls) > 0:
             tool_calls = []
             for tool_call in self.tool_calls:
@@ -84,15 +110,19 @@ class Message(BaseModel):
                         "arguments": tool_call.arguments
                     }
                 })
-            return {
-                "role": self.role,
-                "tool_calls": tool_calls
-            }
-        else:
-            return {
-                "role": self.role,
-                "content": self.content
-            }
+            result["tool_calls"] = tool_calls
+
+        if self.images is not None:
+            images = []
+            if self.images is not None:
+                for image in self.images:
+                    # pull image from file, encode it as base64
+                    with open(image, "rb") as image_file:
+                        encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+                    images.append(encoded_string)
+            result["images"] = images
+
+        return result
     
 class MultiWriter:
     def __init__(self, *files):
