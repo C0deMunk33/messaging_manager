@@ -55,6 +55,8 @@ async def main():
         user_prompt = """Please determine if User A needs to respond next in the conversion and if so draft an appropriate response.
         If you determine that User A does not need to respond, set the response_needed to False."""
         for message in messages:
+            # TODO add time as "minutes ago" "hours ago" "days ago" etc
+            # TODO add media to the prompt
             if message.sender_name == "user":
                 user_prompt += f"User A: {message.message_content}\n"
             else:

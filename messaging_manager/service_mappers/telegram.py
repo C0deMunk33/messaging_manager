@@ -87,6 +87,62 @@ class TelegramServiceMapper(ServiceMapperInterface):
                 print(message)
                 print("~" * 100)
                 #TODO  if message media get url, type, site_name, title, description, send image to ollama?
+                # reddit links preview
+                # X links don't preview, or at least not always
+
+                if message.media:
+                    print(f"type of media: {type(message.media)}")
+                    print("~" * 100)
+                    """type of media: <class 'telethon.tl.types.MessageMediaWebPage'>
+.webpage.url
+.webpage.description
+.webpage.photo # figure this out. the type is Photo
+
+type of media: <class 'telethon.tl.types.MessageMediaPhoto'>
+.photo
+
+type of media: <class 'telethon.tl.types.MessageMediaDocument'>
+.document.mime_type
+.document.file_reference
+# find way to get .document
+
+example:
+path = await client.download_media(message)
+await client.download_media(message, filename)
+# or
+path = await message.download_media()
+await message.download_media(filename)
+
+# Downloading to memory
+blob = await client.download_media(message, bytes)
+
+# Printing download progress
+def callback(current, total):
+    print('Downloaded', current, 'out of', total,
+          'bytes: {:.2%}'.format(current / total))
+
+await client.download_media(message, progress_callback=callback)
+
+MessageMediaContact	
+MessageMediaDice
+MessageMediaDocument	
+MessageMediaEmpty
+MessageMediaGame	
+MessageMediaGeo
+MessageMediaGeoLive	
+MessageMediaGiveaway
+MessageMediaGiveawayResults	
+MessageMediaInvoice
+MessageMediaPaidMedia	
+MessageMediaPhoto
+MessageMediaPoll	
+MessageMediaStory
+MessageMediaUnsupported	
+MessageMediaVenue
+MessageMediaWebPage
+"""
+
+
                 source_id = get_source_id(dialog.message.peer_id.user_id)
                 result_message = UnifiedMessageFormat(
                     message_id=str(uuid.uuid4()),
