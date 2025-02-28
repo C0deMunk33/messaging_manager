@@ -70,12 +70,18 @@ class TelegramServiceMapper(ServiceMapperInterface):
         results = []
         min_id = 0
         me = await self.client.get_me()
+
+        parent_posts = {} # grouped_id -> parent_post_id
         if latest_message is not None:
             min_id = latest_message.message_id
         async for dialog in self.client.iter_dialogs(limit=2):
             if dialog.name is None or dialog.name == "":
                 continue
             async for message in self.client.iter_messages(entity=dialog.message.peer_id, limit=limit_per_source, min_id=min_id):
+                print("~" * 100)
+                print(message)
+                print("~" * 100)
+
                 generated_message_id = hashlib.sha256((str(message.id) + "telegram").encode()).hexdigest()
                 from_id = message.peer_id.user_id
                 if message.from_id is not None:
@@ -98,10 +104,19 @@ class TelegramServiceMapper(ServiceMapperInterface):
                 if os.path.exists(media_dir):
                     media_downloaded = True
 
+                skip_msg = False
                 if message.media and not media_downloaded:
-                    # create folder for media
+                    if message.grouped_id:
+                        if message.grouped_id not in parent_posts:
+                            parent_posts[message.grouped_id] = generated_message_id
+                        else:
+                            media_dir = os.path.join(self.media_dir, str(parent_posts[message.grouped_id]))
+                            skip_msg = True
+
+                    # make media dir if it doesn't exist
                     if not os.path.exists(media_dir):
                         os.makedirs(media_dir)
+
                     media_type = type(message.media)
                     if media_type == telethon.tl.types.MessageMediaWebPage:
                         final_message = f"shared a webpage: {message.media.webpage.url}\n"
@@ -134,7 +149,8 @@ class TelegramServiceMapper(ServiceMapperInterface):
                     message_timestamp=message.date,
                     file_paths=file_paths
                 )
-                results.append(result_message)
+                if not skip_msg:
+                    results.append(result_message)
 
         # find the latest message
         latest_message = max(results, key=lambda x: x.message_timestamp)

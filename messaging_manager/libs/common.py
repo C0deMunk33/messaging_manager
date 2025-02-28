@@ -12,7 +12,7 @@ def call_ollama_chat(server_url, model, messages, json_schema=None, temperature=
         client = Client(
             host=server_url
         )
-        
+        # TODO: un hardcode model
         response = client.chat(
             #model='huggingface.co/unsloth/DeepSeek-R1-Distill-Qwen-14B-GGUF:Q8_0', 
             #model='MFDoom/deepseek-r1-tool-calling:14b',
