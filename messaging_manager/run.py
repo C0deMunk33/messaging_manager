@@ -1,4 +1,5 @@
 import os
+import shutil
 import asyncio
 from pydantic import BaseModel
 from typing import Optional
@@ -26,8 +27,9 @@ async def main():
     session_key = "session one"
 
     media_dir = "media"
-    if not os.path.exists(media_dir):
-        os.makedirs(media_dir)
+    if os.path.exists(media_dir):
+        shutil.rmtree(media_dir)
+    os.makedirs(media_dir)
 
     service_mapper = TelegramServiceMapper(
         init_keys={"api_id": api_id, "api_hash": api_hash},
@@ -38,12 +40,14 @@ async def main():
     await service_mapper.login()
     is_logged_in = await service_mapper.is_logged_in()
 
-    message_limit = 5
+    message_limit = 15
 
     new_messages = await service_mapper.get_new_messages(limit_per_source=message_limit)
 
     print(await service_mapper.get_service_metadata())
-    print(new_messages[1].model_dump_json(indent=4))
+    for message in new_messages:
+        print("~" * 100)
+        print(message.model_dump_json(indent=4))
     return
 
     # group messages by source ID

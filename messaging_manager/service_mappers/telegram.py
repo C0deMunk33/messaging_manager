@@ -77,12 +77,25 @@ class TelegramServiceMapper(ServiceMapperInterface):
         async for dialog in self.client.iter_dialogs(limit=2):
             if dialog.name is None or dialog.name == "":
                 continue
+
+            all_messages = []
             async for message in self.client.iter_messages(entity=dialog.message.peer_id, limit=limit_per_source, min_id=min_id):
+                all_messages.append(message)
+
+            for message in reversed(all_messages):
                 print("~" * 100)
                 print(message)
                 print("~" * 100)
+                generated_message_id = hashlib.sha256((str(message.id) + "telegram").encode()).hexdigest()                
+                source_keys={"peer_id": str(dialog.message.peer_id.user_id), "message_id": str(message.id)}                               
 
-                generated_message_id = hashlib.sha256((str(message.id) + "telegram").encode()).hexdigest()
+                media_dir = os.path.join(self.media_dir, str(generated_message_id))
+
+                if message.grouped_id:
+                    generated_grouped_message_id = hashlib.sha256((str(message.grouped_id) + "telegram").encode()).hexdigest()
+                    media_dir = os.path.join(self.media_dir, str(generated_grouped_message_id))
+                    source_keys["grouped_id"] = str(message.grouped_id)
+ 
                 from_id = message.peer_id.user_id
                 if message.from_id is not None:
                     from_id = message.from_id.user_id
@@ -95,27 +108,14 @@ class TelegramServiceMapper(ServiceMapperInterface):
                 # reddit links preview
                 # X links don't preview, or at least not always
                 # only one media per message, when you send multiple files in telegram, each file is a new message. the caption is attached to the first message as .message .
-                file_paths = []
-                final_message = ""
-                # if media dir already exists, skip
-                media_downloaded = False
-                media_dir = os.path.join(self.media_dir, str(generated_message_id))
+                final_message = message.message
 
-                if os.path.exists(media_dir):
-                    media_downloaded = True
-
-                skip_msg = False
-                if message.media and not media_downloaded:
-                    if message.grouped_id:
-                        if message.grouped_id not in parent_posts:
-                            parent_posts[message.grouped_id] = generated_message_id
-                        else:
-                            media_dir = os.path.join(self.media_dir, str(parent_posts[message.grouped_id]))
-                            skip_msg = True
-
+                if message.media:
                     # make media dir if it doesn't exist
                     if not os.path.exists(media_dir):
                         os.makedirs(media_dir)
+                    
+                    source_keys["media_dir"] = media_dir
 
                     media_type = type(message.media)
                     if media_type == telethon.tl.types.MessageMediaWebPage:
@@ -128,34 +128,53 @@ class TelegramServiceMapper(ServiceMapperInterface):
                         await message.download_media(media_dir)
                     elif media_type == telethon.tl.types.MessageMediaDocument:
                         await message.download_media(media_dir)
-                    
-                    media_downloaded = True
-                else:
-                    final_message = message.message
-                # get file paths for each file in media_dir
-                if media_downloaded:
-                    for file in os.listdir(media_dir):
-                        file_paths.append(os.path.join(media_dir, file))
 
+
+                    source_keys["media_type"] = str(media_type)
+                        
                 source_id = get_source_id(dialog.message.peer_id.user_id)
                 result_message = UnifiedMessageFormat(
                     message_id=generated_message_id,
                     service_name="telegram",
                     source_id=source_id,
-                    source_keys={"peer_id": str(dialog.message.peer_id.user_id), "message_id": str(message.id)},
+                    source_keys=source_keys,
                     message_content=final_message,
                     sender_id=str(from_id),
                     sender_name=sender_name,
                     message_timestamp=message.date,
-                    file_paths=file_paths
+                    file_paths=[]
                 )
-                if not skip_msg:
-                    results.append(result_message)
+                
+                results.append(result_message)
+
+        final_messages = []
+        processed_grouped_ids = []
+        # get file paths for each file in media_dir
+        for message in results:
+            if "media_dir" in message.source_keys:
+                media_dir = message.source_keys["media_dir"]
+                if os.path.exists(media_dir):
+                    for file in os.listdir(media_dir):
+                        message.file_paths.append(os.path.join(media_dir, file))
+
+            if "grouped_id" not in message.source_keys:
+                final_messages.append(message)
+            else:
+                if message.source_keys["grouped_id"] not in processed_grouped_ids:
+                    # get all messages with the same grouped_id
+                    grouped_messages = [m for m in results if "grouped_id" in m.source_keys and m.source_keys["grouped_id"] == message.source_keys["grouped_id"]]
+                    # sort by message_timestamp
+                    grouped_messages.sort(key=lambda x: x.message_timestamp)
+                    # concat all message_content
+                    message.message_content = "\n".join([m.message_content for m in grouped_messages])
+                    final_messages.append(message)
+                    processed_grouped_ids.append(message.source_keys["grouped_id"])
+
 
         # find the latest message
         latest_message = max(results, key=lambda x: x.message_timestamp)
         self.latest_message_id = latest_message.message_id
-        return results
+        return final_messages
     
     async def reply_to_message(self, message: UnifiedMessageFormat, reply_content: str) -> str:
         peer_id = int(message.source_keys["peer_id"])
