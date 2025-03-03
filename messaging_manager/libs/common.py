@@ -46,7 +46,9 @@ def call_ollama_vision(server_url, model,  messages, json_schema=None, temperatu
     )
 
     response = client.chat(
-        model="minicpm-v",
+        #model="minicpm-v",
+        #model="llava:34b",
+        model=model,
         messages=[m.chat_ml() for m in messages],
         format=json_schema,
         tools=tools,

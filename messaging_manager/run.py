@@ -18,9 +18,36 @@ class DraftResponse(BaseModel):
     response_needed: bool
     response: Optional[str] = None
 
-def get_contextual_caption(image_path, chat_context):
+class ContextualCaption(BaseModel):
+    thoughts: str
+    reasoning: str
+    detailed_description: str
+    context: str
+    final_description: str
+
+def get_contextual_caption(server_url, image_path, chat_context):
     # TODO call vision model to get a description of the image in context
-    return "TODO"
+    context_system_prompt = """Your task is to accurately and comprehensively describe the image. Use the chat context to help you describe the image and how it relates to the chat."""
+    context_user_prompt = f"""Chat context: 
+    {chat_context}
+    
+    Please respond with the following JSON format:
+    {ContextualCaption.model_json_schema()}"""
+
+    ollama_messages = [Message(role="system", content=context_system_prompt)]
+    ollama_messages.append(Message(
+        role="user",
+        images=[image_path],
+        content=context_user_prompt
+    ))
+    response = call_ollama_vision(server_url, "llava:34b", ollama_messages, json_schema=ContextualCaption.model_json_schema())
+    parsed_response = ContextualCaption.model_validate_json(response)
+
+    print("~" * 100)
+    print("image description:")
+    print(parsed_response.model_dump_json(indent=4))
+    print("~" * 100)
+    return parsed_response.final_description
 
 async def main():
     import dotenv
@@ -44,7 +71,7 @@ async def main():
     await service_mapper.login()
     is_logged_in = await service_mapper.is_logged_in()
 
-    message_limit = 6
+    message_limit = 25
 
     new_messages = await service_mapper.get_new_messages(limit_per_source=message_limit)
 
@@ -65,29 +92,42 @@ async def main():
 
     for source_id, messages in messages_by_source_id.items():        
         user_prompt = """Please determine if User A needs to respond next in the conversion and if so draft an appropriate response.
-        If you determine that User A does not need to respond, set the response_needed to False."""
+        If you determine that User A does not need to respond, set the response_needed to False.
         
+"""
+        
+        file_paths = []
+
+        print("~" * 100)
+        print(f"Number of messages: {len(messages)}")
+        print("~" * 100)
+
         for message in messages:
             file_paths = []
             # TODO add time as "minutes ago" "hours ago" "days ago" etc
             # TODO add media to the prompt
-            if message.sender_name == "user":
-                user_prompt += f"User A: {message.message_content}\n"
-            else:
-                user_prompt += f"User B: {message.message_content}\n"
+            user_name = "User A"
+            if message.sender_name != "user":
+                user_name = "User B"
+            
+            user_prompt += f"{user_name}: {message.message_content}\n"
             
             for file_path in message.file_paths:
-                caption = get_contextual_caption(file_path, user_prompt)
-                user_prompt += f"Image [{file_path}]: {caption}\n"
-
+                file_paths.append(file_path)
+                caption = get_contextual_caption(server_url, file_path, user_prompt)
+                user_prompt += f"{user_name}: shared an image. Description: [{caption}]\n"
+                
 
         user_prompt += f"\nPlease respond with the following JSON format: \n{DraftResponse.model_json_schema()}"
 
         ollama_messages = [Message(role="system", content=system_prompt)]
-        
+        print("~" * 100)
+        print("user prompt:")
+        print(user_prompt)
         print("~" * 100)
         # call ollama chat        
         ollama_messages.append(Message(role="user", content=user_prompt))
+
         response = call_ollama_chat(server_url, "Qwen2.5-14B-Instruct-1M-GGUF", ollama_messages, json_schema=DraftResponse.model_json_schema())
         draft_response = DraftResponse.model_validate_json(response)
         print("~")
