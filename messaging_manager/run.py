@@ -99,7 +99,56 @@ async def pull_loop(db_engine):
     
     await pull_latest_messages(db_engine, mappers)
     
-    
+async def process_messages(server_url, db_engine):
+    # get all messages, group by source ID, limited to 25 messages per source
+    with Session(db_engine) as session:
+        messages = select(UnifiedMessageFormat)
+        messages = session.exec(messages).all()
+        messages_by_source_id = {}
+        for message in messages:
+            if message.source_id not in messages_by_source_id:
+                messages_by_source_id[message.source_id] = []
+            messages_by_source_id[message.source_id].append(message)
+            if len(messages_by_source_id[message.source_id]) > 25:
+                messages_by_source_id[message.source_id].pop(0)
+        
+        for source_id, messages in messages_by_source_id.items():
+            system_prompt = get_system_prompt()
+            user_prompt = """Please determine if User A needs to respond next in the conversion and if so draft an appropriate response.
+            If you determine that User A does not need to respond, set the response_needed to False.
+            """
+
+            file_paths = []
+            for message in messages:
+                # TODO add time as "minutes ago" "hours ago" "days ago" etc
+                # TODO add media to the prompt
+                user_name = "User A"
+                if message.sender_name != "user":
+                    user_name = "User B"
+                
+                user_prompt += f"{user_name}: {message.message_content}\n"
+                
+                for file_path in message.file_paths:
+                    file_paths.append(file_path)
+                    caption = get_contextual_caption(server_url, file_path, user_prompt)
+                    user_prompt += f"{user_name}: shared an image. Description: [{caption}]\n"
+                
+            user_prompt += f"\nPlease respond with the following JSON format: \n{DraftResponse.model_json_schema()}"
+
+            ollama_messages = [Message(role="system", content=system_prompt)]
+            ollama_messages.append(Message(role="user", content=user_prompt))
+
+            response = call_ollama_chat(server_url, "Qwen2.5-14B-Instruct-1M-GGUF", ollama_messages, json_schema=DraftResponse.model_json_schema())
+            draft_response = DraftResponse.model_validate_json(response)    
+
+            print("~" * 100)
+            if draft_response.response_needed:
+                print("suggested response:")
+                print(draft_response.response)
+            else:
+                print("No response needed")
+
+
 
 async def main_old():
     import dotenv
@@ -201,8 +250,6 @@ async def main_old():
 # todo: embed the messages and the response
 # todo: save the embedding to a vector database
 # todo: call vector database for more context
-    
-    
 
 if __name__ == "__main__":
     media_dir = "media"
@@ -231,3 +278,5 @@ if __name__ == "__main__":
         messages = select(UnifiedMessageFormat)
         message_count = session.exec(messages).all()
         print(f"Message count: {len(message_count)}")
+
+    asyncio.run(process_messages(os.getenv("OLLAMA_SERVER_URL"), engine))
