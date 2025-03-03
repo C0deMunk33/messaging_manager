@@ -6,6 +6,9 @@ from typing import Optional
 from messaging_manager.service_mappers.telegram import TelegramServiceMapper
 from messaging_manager.libs.common import call_ollama_chat, Message, call_ollama_vision, ToolSchema
 import json
+from messaging_manager.libs.service_mapper_interface import ServiceMapperInterface, UnifiedMessageFormat
+from sqlmodel import create_engine, Session, SQLModel, select
+
 def get_system_prompt():
     # TODO: add in extra context, like user name and profile
     return """You will be provided recent messages between User A and User B, your task is to determine if User A needs to respond next in the conversation and if so draft an appropriate response.
@@ -49,7 +52,56 @@ def get_contextual_caption(server_url, image_path, chat_context):
     print("~" * 100)
     return parsed_response.final_description
 
-async def main():
+
+async def pull_latest_messages(db_engine, service_mappers: list[ServiceMapperInterface]):
+    latest_messages = []
+    service_metadata = {}
+    with Session(db_engine) as session:
+        for service_mapper in service_mappers:
+            if not await service_mapper.is_logged_in():
+                await service_mapper.login()
+            
+            metadata = await service_mapper.get_service_metadata()
+            service_metadata[metadata.service_name] = metadata
+
+            # get the latest message from the database
+            latest_message = session.exec(select(UnifiedMessageFormat)
+                                          .where(UnifiedMessageFormat.service_name == metadata.service_name)
+                                          .order_by(UnifiedMessageFormat.message_timestamp.desc())).first()
+
+            latest_messages.extend(await service_mapper.get_new_messages(latest_message, limit_per_source=25))
+            await service_mapper.logout()
+        
+        session.add_all(latest_messages)
+        session.commit()
+    return latest_messages
+    
+
+async def pull_loop(db_engine):
+    import dotenv
+    dotenv.load_dotenv()
+    server_url = os.getenv("OLLAMA_SERVER_URL")
+    api_id = os.getenv("TELEGRAM_API_ID")
+    api_hash = os.getenv("TELEGRAM_API_HASH")
+    session_key = "session one"
+
+    media_dir = "media"
+
+    mappers = [
+        TelegramServiceMapper(
+            init_keys={"api_id": api_id, 
+                       "api_hash": api_hash, 
+                       "latest_message_id": 0, 
+                       "session_name": session_key},
+            media_dir=media_dir
+        )
+    ]
+    
+    await pull_latest_messages(db_engine, mappers)
+    
+    
+
+async def main_old():
     import dotenv
     dotenv.load_dotenv()
     server_url = os.getenv("OLLAMA_SERVER_URL")
@@ -63,8 +115,10 @@ async def main():
     os.makedirs(media_dir)
 
     service_mapper = TelegramServiceMapper(
-        init_keys={"api_id": api_id, "api_hash": api_hash},
-        session_name=session_key,
+        init_keys={"api_id": api_id, 
+                   "api_hash": api_hash,
+                   "latest_message_id": 0,
+                   "session_name": session_key},
         media_dir=media_dir
     )
 
@@ -151,4 +205,29 @@ async def main():
     
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    media_dir = "media"
+    if os.path.exists(media_dir):
+        shutil.rmtree(media_dir)
+    os.makedirs(media_dir)
+
+    # delete the messages.db file
+    if os.path.exists("messages.db"):
+        os.remove("messages.db")
+
+    engine = create_engine("sqlite:///messages.db")
+    SQLModel.metadata.create_all(engine)
+    
+    asyncio.run(pull_loop(engine))
+
+    # get message count from sqlite db
+    with Session(engine) as session:
+        messages = select(UnifiedMessageFormat)
+        message_count = session.exec(messages).all()
+        print(f"Message count: {len(message_count)}")
+
+    asyncio.run(pull_loop(engine))
+
+    with Session(engine) as session:
+        messages = select(UnifiedMessageFormat)
+        message_count = session.exec(messages).all()
+        print(f"Message count: {len(message_count)}")

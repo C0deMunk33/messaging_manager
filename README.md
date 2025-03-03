@@ -8,3 +8,13 @@ for telegram keys, go Here: https://my.telegram.org/apps
 
 create env (see .env.example)
 poetry run python -m messaging_manager.run
+
+
+
+
+TODO:
+writing samples
+persona
+profiling
+vector memory
+UI

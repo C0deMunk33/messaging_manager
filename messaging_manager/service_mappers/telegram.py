@@ -22,14 +22,16 @@ def display_url_as_qr(url):
     gen_qr(url)
 
 class TelegramServiceMapper(ServiceMapperInterface):
-    def __init__(self, init_keys: dict[str, str], session_name: str = None, media_dir: str = None):
+    def __init__(self, init_keys: dict[str, str], media_dir: str = None):
         super().__init__()
         # hash the init keys
-        self.session_name = session_name
-        self.latest_message_id = 0
+        
         self.client = None
         self.init_keys = init_keys
         self.media_dir = media_dir
+        self.latest_message_id = self.init_keys['latest_message_id']
+
+        self.session_name = self.init_keys['session_name']
         self.client = telethon.TelegramClient(session=self.session_name, api_id=self.init_keys['api_id'], api_hash=self.init_keys['api_hash'])
 
     async def login(self) -> bool:
@@ -63,6 +65,10 @@ class TelegramServiceMapper(ServiceMapperInterface):
                 await qr_login.recreate()
         return None
 
+    async def logout(self) -> bool:
+        await self.client.disconnect()
+        return True
+
     async def is_logged_in(self) -> bool:
         return self.client.is_connected()
     
@@ -73,7 +79,7 @@ class TelegramServiceMapper(ServiceMapperInterface):
 
         parent_posts = {} # grouped_id -> parent_post_id
         if latest_message is not None:
-            min_id = latest_message.message_id
+            min_id = int(latest_message.source_keys["message_id"])
         async for dialog in self.client.iter_dialogs(limit=2):
             if dialog.name is None or dialog.name == "":
                 continue
@@ -171,8 +177,9 @@ class TelegramServiceMapper(ServiceMapperInterface):
 
 
         # find the latest message
-        latest_message = max(results, key=lambda x: x.message_timestamp)
-        self.latest_message_id = latest_message.message_id
+        if len(final_messages) > 0:
+            latest_message = max(final_messages, key=lambda x: x.message_timestamp)
+            self.latest_message_id = latest_message.message_id
         return final_messages
     
     async def reply_to_message(self, message: UnifiedMessageFormat, reply_content: str) -> str:
@@ -184,7 +191,13 @@ class TelegramServiceMapper(ServiceMapperInterface):
     async def get_service_metadata(self) -> ServiceMetadata:
         return ServiceMetadata(
             service_name="telegram",
-            init_keys=["api_id", "api_hash"]
+            init_keys=["api_id", "api_hash", "latest_message_id", "session_name"],
+            reinitialize_keys={
+                "latest_message_id": self.latest_message_id,
+                "session_name": self.session_name,
+                "api_id": self.init_keys["api_id"],
+                "api_hash": self.init_keys["api_hash"]
+            }
         )
 
 
