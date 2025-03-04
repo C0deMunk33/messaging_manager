@@ -125,8 +125,14 @@ class TelegramServiceMapper(ServiceMapperInterface):
 
                     media_type = type(message.media)
                     if media_type == telethon.tl.types.MessageMediaWebPage:
-                        final_message = f"shared a webpage: {message.media.webpage.title} ({message.media.webpage.url})\n"
-                        final_message += f"comment: {message.message}"
+                        if type(message.media.webpage) == telethon.tl.types.WebPageEmpty:
+                            final_message = f"shared a webpage: {message.media.webpage.url}\n"
+                        else:
+                            final_message = f"shared a webpage: {message.media.webpage.title} ({message.media.webpage.url})\n"
+                        
+                        if message.message and message.message != "":
+                            final_message += f"comment: {message.message}"
+                            
                         # TODO: scrape page
                     elif media_type == telethon.tl.types.MessageMediaPhoto:
                         # download media
