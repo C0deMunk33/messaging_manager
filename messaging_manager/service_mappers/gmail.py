@@ -22,7 +22,7 @@ import re
 import json
 from datetime import datetime, timedelta
 import traceback
-class EmailServiceMapper(ServiceMapperInterface):
+class GmailServiceMapper(ServiceMapperInterface):
     def __init__(self, init_keys: dict[str, str], media_dir: str = None):
         super().__init__()
         self.init_keys = init_keys
@@ -437,9 +437,17 @@ class EmailServiceMapper(ServiceMapperInterface):
                 message_text = message_text.strip()
 
                 # for each file path, see if the filename is in the message_text, if not, remove the file path
-                print(f"File paths: {[os.path.basename(fp) for fp in file_paths]}")  
-                print(f"Message text: {message_text}")
                 file_paths = [fp for fp in file_paths if os.path.basename(fp) in message_text]
+                # remove any files from media_dir that are not in the file_paths
+                if os.path.exists(media_dir):
+                    for file in os.listdir(media_dir):
+                        if os.path.join(media_dir, file) not in file_paths:
+                            os.remove(os.path.join(media_dir, file))
+                    
+                    # if the media_dir exists, is empty, remove it
+                    if not os.listdir(media_dir):
+                        os.rmdir(media_dir)
+                    
                 # Create unified message format
                 unified_message = UnifiedMessageFormat(
                     message_id=generated_email_id,
@@ -606,7 +614,7 @@ class EmailServiceMapper(ServiceMapperInterface):
 
 
 async def main():
-    """Test function for EmailServiceMapper"""
+    """Test function for GmailServiceMapper"""
     import dotenv
     
     # Load environment variables
@@ -651,11 +659,11 @@ async def main():
         init_keys["smtp_server"] = os.getenv("EMAIL_SMTP_SERVER")
         init_keys["smtp_port"] = os.getenv("EMAIL_SMTP_PORT", "587")
     
-    print(f"Initializing EmailServiceMapper with: {email}")
+    print(f"Initializing GmailServiceMapper with: {email}")
     print(f"Authentication method: {'OAuth' if 'oauth_token' in init_keys else 'Password'}")
     
     # Create service mapper
-    service_mapper = EmailServiceMapper(
+    service_mapper = GmailServiceMapper(
         init_keys=init_keys,
         media_dir=media_dir
     )
