@@ -1,3 +1,5 @@
+test_messages.json
+
 *.session
 *.session-journal
 media/

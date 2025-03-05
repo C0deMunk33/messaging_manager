@@ -18,8 +18,8 @@ def call_ollama_chat(server_url, model, messages, json_schema=None, temperature=
             # huggingface.co/bartowski/Qwen2.5-14B-Instruct-1M-GGUF
             #model='MFDoom/deepseek-r1-tool-calling:14b',
             #deepseek-r1:32b
-            #ollama run deepseek-r1:70b
-            model='deepseek-r1:70b',
+            #deepseek-r1:70b
+            model='huggingface.co/bartowski/Qwen_QwQ-32B-GGUF:Q8_0',
             stream=False,
             messages=[m.chat_ml() for m in messages],
             format=json_schema,

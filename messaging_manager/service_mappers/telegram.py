@@ -221,7 +221,7 @@ async def main():
     is_logged_in = await service_mapper.is_logged_in()
     print(is_logged_in)
     new_messages = await service_mapper.get_new_messages()
-    print(new_messages)
+
     print(await service_mapper.get_service_metadata())
 
 if __name__ == "__main__":

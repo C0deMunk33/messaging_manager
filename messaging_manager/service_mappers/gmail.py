@@ -20,7 +20,8 @@ import asyncio
 import base64
 import re
 import json
-
+from datetime import datetime, timedelta
+import traceback
 class EmailServiceMapper(ServiceMapperInterface):
     def __init__(self, init_keys: dict[str, str], media_dir: str = None):
         super().__init__()
@@ -287,340 +288,246 @@ class EmailServiceMapper(ServiceMapperInterface):
         except:
             return False
 
-    def _decode_email_part(self, part) -> tuple:
-        """Decode email part content and return content type and data"""
-        content_type = part.get_content_type()
-        content_disposition = str(part.get("Content-Disposition", ""))
-        
-        if "attachment" in content_disposition:
-            # Handle attachment
-            filename = part.get_filename()
-            if filename:
-                # Clean filename to decode if necessary
-                if decode_header(filename)[0][1] is not None:
-                    filename = decode_header(filename)[0][0].decode(decode_header(filename)[0][1])
-                
-                # Return attachment info
-                return "attachment", {
-                    "filename": filename,
-                    "data": part.get_payload(decode=True),
-                    "content_type": content_type
-                }
-        
-        if content_type == "text/plain":
-            # Get plain text content
-            try:
-                payload = part.get_payload(decode=True).decode(part.get_content_charset() or 'utf-8', errors='replace')
-                return "text/plain", payload
-            except:
-                return "text/plain", "Error decoding text content"
-                
-        elif content_type == "text/html":
-            # Get HTML content
-            try:
-                payload = part.get_payload(decode=True).decode(part.get_content_charset() or 'utf-8', errors='replace')
-                return "text/html", payload
-            except:
-                return "text/html", "Error decoding HTML content"
-        
-        return None, None
+    def process_emails(self, email_ids: List[str], box: str) -> List[UnifiedMessageFormat]:
+        results = []
+        for email_id in email_ids:
+                # Convert bytes to string if needed
+                if isinstance(email_id, bytes):
+                    email_id_str = email_id.decode('utf-8')
+                else:
+                    email_id_str = str(email_id)
 
-    def _extract_email_content(self, msg) -> tuple:
-        """Extract text content and attachments from email message"""
-        text_content = ""
-        html_content = ""
-        attachments = []
-        
-        # Handle single part emails
-        if msg.is_multipart():
-            for part in msg.walk():
-                content_type, content = self._decode_email_part(part)
+                generated_email_id = hashlib.sha256(f"{box} {email_id_str}".encode()).hexdigest()
+                media_dir = os.path.join(self.media_dir, generated_email_id)
                 
-                if content_type == "text/plain":
-                    text_content = content
-                elif content_type == "text/html":
-                    html_content = content
-                elif content_type == "attachment":
-                    attachments.append(content)
-        else:
-            content_type, content = self._decode_email_part(msg)
-            if content_type == "text/plain":
-                text_content = content
-            elif content_type == "text/html":
-                html_content = content
+                # Correctly fetch the email using RFC822
+                status, msg_data = self.imap_conn.fetch(email_id, '(RFC822)')
+                if status != 'OK' or not msg_data or msg_data[0] is None:
+                    print(f"Failed to fetch email {email_id}: {msg_data}")
+                    print(traceback.format_exc())
+                    continue
                 
-        # Prefer plain text, but use HTML if that's all we have
-        final_content = text_content if text_content else html_content
-        
-        return final_content, attachments
+                # Check if we have valid data structure before accessing
+                if not isinstance(msg_data[0], tuple) or len(msg_data[0]) < 2:
+                    print(f"Unexpected response format for email {email_id}: {msg_data}")
+                    continue
+                
+                # The email body is in the second part of the first item in msg_data
+                email_body = msg_data[0][1]
+                if not email_body:
+                    print(f"Empty email body for email {email_id}")
+                    continue
+                    
+                message = email.message_from_bytes(email_body)
 
-    def _get_sender_info(self, msg) -> tuple:
-        """Extract sender name and email from message"""
-        from_header = msg["From"]
-        sender_email = ""
-        sender_name = ""
-        
-        # Extract name and email from the from header
-        match = re.search(r'"?([^"<]+)"?\s*<?([^>]*)>?', from_header)
-        if match:
-            sender_name, sender_email = match.groups()
-            sender_name = sender_name.strip()
-            sender_email = sender_email.strip()
-        else:
-            sender_email = from_header
-            sender_name = from_header
-            
-        return sender_name, sender_email
+                # Get other party's id
+                sender_email = self.extract_email(message['From'])
+                other_party_id = sender_email
+                sender_name = message['From']
+                
+                if sender_email == self.email:
+                    sender_name = "user"
+                    other_party_id = self.extract_email(message['To'])
 
+                # Get subject
+                subject = message['Subject'] or ""
+                # Get thread id by stripping out RE: from the subject and hashing that with the other party's id
+                stripped_subject = re.sub(r'(?i)^Re:\s*', '', subject)
+
+                source_id = hashlib.sha256(f"{stripped_subject} {other_party_id}".encode()).hexdigest()
+                file_paths = []
+                
+                # Process attachments and message content
+                if message.is_multipart():
+                    message_text = ""
+                    for part in message.walk():
+                        content_type = part.get_content_type()
+                        content_disposition = str(part.get("Content-Disposition"))
+                        
+                        # Handle attachments
+                        if "attachment" in content_disposition:
+                            filename = part.get_filename()
+                            if filename:
+                                if not os.path.exists(media_dir):
+                                    os.makedirs(media_dir)
+                                filepath = os.path.join(media_dir, filename)
+                                print(f"Saving attachment to {filepath}")
+                                message_text += f"\n[Attachment: {filename}]"
+                                with open(filepath, 'wb') as f:
+                                    f.write(part.get_payload(decode=True))
+                                file_paths.append(filepath)
+                        
+                        # Handle inline images with Content-ID, only if not in a reply block
+                        elif "Content-ID" in part:
+                            content_id = part["Content-ID"].strip("<>")
+                            if content_id and part.get_payload(decode=True):
+                                # Try to get original filename
+                                filename = None
+                                
+                                # Try Content-Disposition first
+                                content_disposition = str(part.get("Content-Disposition", ""))
+                                if "filename=" in content_disposition:
+                                    filename_match = re.search(r'filename=["\'](.*?)["\']', content_disposition)
+                                    if filename_match:
+                                        filename = filename_match.group(1)
+                                
+                                # If no filename found, try Content-Type header
+                                if not filename:
+                                    content_type = str(part.get("Content-Type", ""))
+                                    if "name=" in content_type:
+                                        name_match = re.search(r'name=["\'](.*?)["\']', content_type)
+                                        if name_match:
+                                            filename = name_match.group(1)
+                                
+                                # If still no filename, fallback to Content-ID, but try to extract a meaningful name
+                                if not filename:
+                                    # Sometimes Content-IDs follow patterns like image001.jpg@01D... or filename.ext@...
+                                    cid_filename_match = re.search(r'^([^@]+)@', content_id)
+                                    if cid_filename_match:
+                                        cid_filename = cid_filename_match.group(1)
+                                        if '.' in cid_filename:  # Looks like it might have an extension
+                                            filename = cid_filename
+                                        else:
+                                            # Determine extension based on MIME type
+                                            mime_to_ext = {
+                                                'image/jpeg': '.jpg',
+                                                'image/png': '.png',
+                                                'image/gif': '.gif',
+                                                'image/bmp': '.bmp',
+                                            }
+                                            ext = mime_to_ext.get(part.get_content_type(), '.bin')
+                                            filename = f"{content_id}{ext}"
+                                    else:
+                                        # Just use the content_id with appropriate extension
+                                        mime_to_ext = {
+                                            'image/jpeg': '.jpg',
+                                            'image/png': '.png',
+                                            'image/gif': '.gif',
+                                            'image/bmp': '.bmp',
+                                        }
+                                        ext = mime_to_ext.get(part.get_content_type(), '.bin')
+                                        filename = f"{content_id}{ext}"
+                                
+                                if not os.path.exists(media_dir):
+                                    os.makedirs(media_dir)
+                                    
+                                filepath = os.path.join(media_dir, filename)
+                                print(f"Saving inline image to {filepath}")
+                                with open(filepath, 'wb') as f:
+                                    payload = part.get_payload(decode=True)
+                                    print(f"Payload: {len(payload)}")
+                                    f.write(payload)
+                                file_paths.append(filepath)
+                        
+                        # Get text content
+                        elif content_type == "text/plain" and "attachment" not in content_disposition:
+                            payload = part.get_payload(decode=True)
+                            if payload:
+                                message_text += payload.decode('utf-8', errors='replace')
+                else:
+                    # For non-multipart messages
+                    payload = message.get_payload(decode=True)
+                    message_text = payload.decode('utf-8', errors='replace') if payload else ""
+                
+                # Clean the message text
+                # strip out reply blocks start with "On" and ALWAYS ends with TWO or more \r\n> or \r\n>>
+                # needs to the last of this pattern
+                # Clean the message text
+                message_text = re.sub(r'On.*?wrote:.*?((?:\r\n>|\r\n>>)(?:.(?!(?:\r\n>|\r\n>>)))*$)', '', message_text, flags=re.DOTALL)
+                message_text = message_text.strip()
+
+                # for each file path, see if the filename is in the message_text, if not, remove the file path
+                print(f"File paths: {[os.path.basename(fp) for fp in file_paths]}")  
+                print(f"Message text: {message_text}")
+                file_paths = [fp for fp in file_paths if os.path.basename(fp) in message_text]
+                # Create unified message format
+                unified_message = UnifiedMessageFormat(
+                    message_id=generated_email_id,
+                    service_name="email",
+                    source_id=source_id,
+                    source_keys={
+                        "email_id": email_id_str,
+                        "box": box
+                    },
+                    message_content=message_text,
+                    sender_id=sender_email,
+                    sender_name=sender_name,
+                    message_timestamp=email.utils.parsedate_to_datetime(message['Date']) if message['Date'] else datetime.now(),
+                    file_paths=file_paths
+                )
+                
+                # Add to results
+                results.append(unified_message)
+
+        return results
+    
     async def get_new_messages(self, latest_message: UnifiedMessageFormat = None, limit_per_source: int = 5) -> List[UnifiedMessageFormat]:
-        """Get new email messages"""
+        """Get email messages from both INBOX and Sent folders with thread organization
+        
+        Args:
+            latest_message: The most recent message we've processed (optional)
+            limit_per_source: Maximum number of messages to retrieve per folder
+            
+        Returns:
+            List of UnifiedMessageFormat objects representing emails with consistent thread IDs
+        """
         if not await self.is_logged_in():
             await self.login()
             
         results = []
         
+        # Default to checking the last 30 days if no latest message
+        from datetime import timedelta
+        min_date = datetime.now() - timedelta(days=30)
+        if latest_message:
+            min_date = latest_message.message_timestamp
+
         try:
-            # Select inbox folder
-            self.imap_conn.select("INBOX")
-            
-            # Get all or unseen messages
-            if latest_message and self.latest_message_id:
-                # Try to get messages newer than the latest message
-                status, data = self.imap_conn.search(None, f'SINCE {latest_message.message_timestamp.strftime("%d-%b-%Y")}')
-            else:
-                # Get unseen messages if no latest message
-                status, data = self.imap_conn.search(None, "UNSEEN")
-                
+            # Process Sent folder
+            status, message_count = self.imap_conn.select('"[Gmail]/Sent Mail"')
             if status != 'OK':
-                print("Failed to search for emails")
+                print(f"Failed to select Sent: {message_count}")
+                return results
+            
+            status, data = self.imap_conn.search(None, f'SINCE {min_date.strftime("%d-%b-%Y")}')
+            if status != 'OK':
+                print(f"Failed to search for emails: {data}")
+                return results
+            
+            sent_email_ids = data[0].split()[-limit_per_source:] if data[0] else []
+            print(f"Found {len(sent_email_ids)} sent emails")
+            results.extend(self.process_emails(sent_email_ids, '"[Gmail]/Sent Mail"'))
+
+            # Process INBOX
+            status, message_count = self.imap_conn.select('INBOX')
+            if status != 'OK':
+                print(f"Failed to select INBOX: {message_count}")
                 return results
                 
-            email_ids = data[0].split()
-            
-            # Process emails (newest first, limited by limit_per_source)
-            for i, email_id in enumerate(reversed(email_ids)):
-                if i >= limit_per_source:
-                    break
-                    
-                status, msg_data = self.imap_conn.fetch(email_id, "(RFC822)")
-                if status != 'OK':
-                    continue
+            # Search with SINCE criterion
+            status, data = self.imap_conn.search(None, f'SINCE {min_date.strftime("%d-%b-%Y")}')
+            if status != 'OK':
+                print(f"Failed to search for emails: {data}")
+                return results
                 
-                raw_email = msg_data[0][1]
-                msg = email.message_from_bytes(raw_email)
-                
-                # Get message ID for tracking
-                message_id = msg.get("Message-ID", f"email_{email_id.decode()}")
-                if not message_id:
-                    message_id = f"email_{email_id.decode()}_{hash(raw_email)}"
-                
-                # Generate a deterministic ID for the message
-                generated_message_id = hashlib.sha256((message_id + "email").encode()).hexdigest()
-                
-                # Extract basic email info
-                subject = msg.get("Subject", "")
-                if decode_header(subject)[0][1] is not None:
-                    subject = decode_header(subject)[0][0].decode(decode_header(subject)[0][1])
-                
-                date_str = msg.get("Date", "")
-                try:
-                    # Parse email date format
-                    date_tuple = email.utils.parsedate_tz(date_str)
-                    timestamp = datetime.fromtimestamp(email.utils.mktime_tz(date_tuple))
-                except:
-                    timestamp = datetime.now()
-                
-                # Get sender info
-                sender_name, sender_email = self._get_sender_info(msg)
-                
-                # Extract content and attachments with improved function
-                content, attachments = self._extract_email_content(msg)
-                
-                # Construct message content
-                message_content = f"Subject: {subject}\n\n{content}"
-                
-                # Save attachments if any, including inline images
-                file_paths = []
-                inline_image_map = {}  # Map content IDs to file paths
-                
-                if attachments and self.media_dir:
-                    # Create directory for this email's attachments
-                    media_dir = os.path.join(self.media_dir, str(generated_message_id))
-                    if not os.path.exists(media_dir):
-                        os.makedirs(media_dir)
-                    
-                    for attachment in attachments:
-                        file_path = os.path.join(media_dir, attachment["filename"])
-                        with open(file_path, "wb") as f:
-                            f.write(attachment["data"])
-                        
-                        # Track file paths
-                        file_paths.append(file_path)
-                        
-                        # If this is an inline image with a content ID, map it
-                        if attachment.get("is_inline") and attachment.get("content_id"):
-                            inline_image_map[attachment["content_id"]] = file_path
-                        
-                        print(f"Saved attachment to: {file_path}")
-                
-                # If we have HTML content and inline images, update the HTML to reference local files
-                if content.startswith("<!DOCTYPE html") or "<html" in content:
-                    for cid, file_path in inline_image_map.items():
-                        # Replace "cid:content_id" references with file paths
-                        content = content.replace(f'cid:{cid}', f'file://{file_path}')
-                    
-                    # Update the message content with the modified HTML
-                    message_content = f"Subject: {subject}\n\n{content}"
-                
-                # Create source keys for reference
-                source_keys = {
-                    "email_id": email_id.decode(),
-                    "message_id": message_id,
-                    "subject": subject
-                }
-                
-                if file_paths:
-                    source_keys["media_dir"] = os.path.join(self.media_dir, str(generated_message_id))
-                    source_keys["has_inline_images"] = bool(inline_image_map)
-                
-                # Generate source ID
-                source_id = get_source_id(sender_email)
-                
-                # Create unified message
-                unified_message = UnifiedMessageFormat(
-                    message_id=generated_message_id,
-                    service_name="email",
-                    source_id=source_id,
-                    source_keys=source_keys,
-                    message_content=message_content,
-                    sender_id=sender_email,
-                    sender_name=sender_name,
-                    message_timestamp=timestamp,
-                    file_paths=file_paths
-                )
-                
-                results.append(unified_message)
-            
-            # Update latest message ID if we got any messages
-            if results:
-                latest_msg = max(results, key=lambda x: x.message_timestamp)
-                self.latest_message_id = latest_msg.message_id
-                
-            return results
-            
+            inbox_email_ids = data[0].split()[-limit_per_source:] if data[0] else []
+            print(f"Found {len(inbox_email_ids)} inbox emails")
+            results.extend(self.process_emails(inbox_email_ids, "INBOX"))
+
         except Exception as e:
             print(f"Error getting new messages: {e}")
-            return []
-
-
-    def _extract_email_content(self, msg):
-        """Extract email content and attachments, including inline images
-        
-        Args:
-            msg: Email message object
+            print(traceback.format_exc())
             
-        Returns:
-            tuple: (content, attachments)
-                - content: String with email body
-                - attachments: List of dictionaries with attachment info
-        """
-        content = ""
-        html_content = ""
-        attachments = []
+        return results
         
-        # Process each part of the email
-        if msg.is_multipart():
-            # Handle multipart messages
-            for part in msg.walk():
-                content_type = part.get_content_type()
-                content_disposition = str(part.get("Content-Disposition"))
-                
-                # Get the content ID for potential inline images
-                content_id = part.get("Content-ID")
-                if content_id:
-                    # Remove angle brackets if present
-                    content_id = content_id.strip("<>")
-                
-                # Handle text content
-                if content_type == "text/plain" and "attachment" not in content_disposition:
-                    try:
-                        part_content = part.get_payload(decode=True)
-                        if part_content:
-                            part_content = part_content.decode(errors='replace')
-                            content += part_content
-                    except Exception as e:
-                        print(f"Error decoding plain text: {e}")
-                
-                # Handle HTML content
-                elif content_type == "text/html" and "attachment" not in content_disposition:
-                    try:
-                        part_content = part.get_payload(decode=True)
-                        if part_content:
-                            part_content = part_content.decode(errors='replace')
-                            html_content = part_content
-                    except Exception as e:
-                        print(f"Error decoding HTML: {e}")
-                
-                # Handle inline images (they typically have Content-ID and no Content-Disposition or are inline)
-                elif content_type.startswith("image/") and (content_id or "inline" in content_disposition):
-                    try:
-                        filename = part.get_filename()
-                        if not filename:
-                            # Generate filename for inline images without names
-                            ext = content_type.split('/')[1]
-                            filename = f"inline_image_{len(attachments)}.{ext}"
-                        
-                        # Store inline image data
-                        image_data = part.get_payload(decode=True)
-                        
-                        # Add to attachments
-                        attachments.append({
-                            "filename": filename,
-                            "data": image_data,
-                            "content_type": content_type,
-                            "is_inline": True,
-                            "content_id": content_id
-                        })
-                    except Exception as e:
-                        print(f"Error processing inline image: {e}")
-                
-                # Handle regular attachments
-                elif "attachment" in content_disposition or content_type.startswith(("application/", "image/", "audio/", "video/")):
-                    try:
-                        filename = part.get_filename()
-                        if filename:
-                            # Try to decode the filename if needed
-                            if decode_header(filename)[0][1] is not None:
-                                filename = decode_header(filename)[0][0].decode(decode_header(filename)[0][1])
-                            
-                            attachment_data = part.get_payload(decode=True)
-                            if attachment_data:
-                                attachments.append({
-                                    "filename": filename,
-                                    "data": attachment_data,
-                                    "content_type": content_type,
-                                    "is_inline": False
-                                })
-                    except Exception as e:
-                        print(f"Error processing attachment: {e}")
-        else:
-            # Handle non-multipart messages (simple text)
-            content_type = msg.get_content_type()
-            if content_type == "text/plain":
-                try:
-                    content = msg.get_payload(decode=True).decode(errors='replace')
-                except Exception as e:
-                    print(f"Error decoding non-multipart message: {e}")
-            elif content_type == "text/html":
-                try:
-                    html_content = msg.get_payload(decode=True).decode(errors='replace')
-                except Exception as e:
-                    print(f"Error decoding HTML message: {e}")
-        
-        # Prefer HTML content if available, otherwise use plain text
-        final_content = html_content if html_content else content
-        
-        return final_content, attachments
+    def extract_email(self, header_value):
+        """Extract email address from a header value like 'Name <email@example.com>'"""
+        if not header_value:
+            return ""
+        match = re.search(r'<([^>]+)>', header_value)
+        if match:
+            return match.group(1)
+        return header_value.strip()
     
     async def reply_to_message(self, message: UnifiedMessageFormat, reply_content: str) -> str:
         """Reply to an email message"""
@@ -660,7 +567,7 @@ class EmailServiceMapper(ServiceMapperInterface):
 
     async def get_service_metadata(self) -> ServiceMetadata:
         """Get service metadata for email"""
-        required_keys = ["email", "password", "latest_message_id"]
+        required_keys = ["email", "password",  "latest_message_id"]
         
         # Add OAuth token for Gmail
         if self.provider == 'gmail':
@@ -752,7 +659,7 @@ async def main():
         init_keys=init_keys,
         media_dir=media_dir
     )
-    
+    await service_mapper.logout()
     # Try to log in
     logged_in = await service_mapper.login()
     print(f"Logged in: {logged_in}")
@@ -762,11 +669,9 @@ async def main():
         new_messages = await service_mapper.get_new_messages(limit_per_source=5)
         print(f"Found {len(new_messages)} new messages")
         
-        for msg in new_messages:
-            print(f"From: {msg.sender_name} <{msg.sender_id}>")
-            print(f"Content: {msg.message_content[:100]}...")
-            print(f"Attachments: {len(msg.file_paths)}")
-            print("-" * 50)
+        # save new_messages to file
+        with open("test_messages.json", "w") as f:
+            f.write("\n".join([m.model_dump_json(indent=4) for m in new_messages]))
         
         metadata = await service_mapper.get_service_metadata()
         print(f"Service metadata: {metadata}")
