@@ -405,7 +405,7 @@ class EmailServiceMapper(ServiceMapperInterface):
                 status, msg_data = self.imap_conn.fetch(email_id, "(RFC822)")
                 if status != 'OK':
                     continue
-                    
+                
                 raw_email = msg_data[0][1]
                 msg = email.message_from_bytes(raw_email)
                 
@@ -433,14 +433,16 @@ class EmailServiceMapper(ServiceMapperInterface):
                 # Get sender info
                 sender_name, sender_email = self._get_sender_info(msg)
                 
-                # Extract content and attachments
+                # Extract content and attachments with improved function
                 content, attachments = self._extract_email_content(msg)
                 
                 # Construct message content
                 message_content = f"Subject: {subject}\n\n{content}"
                 
-                # Save attachments if any
+                # Save attachments if any, including inline images
                 file_paths = []
+                inline_image_map = {}  # Map content IDs to file paths
+                
                 if attachments and self.media_dir:
                     # Create directory for this email's attachments
                     media_dir = os.path.join(self.media_dir, str(generated_message_id))
@@ -451,7 +453,24 @@ class EmailServiceMapper(ServiceMapperInterface):
                         file_path = os.path.join(media_dir, attachment["filename"])
                         with open(file_path, "wb") as f:
                             f.write(attachment["data"])
+                        
+                        # Track file paths
                         file_paths.append(file_path)
+                        
+                        # If this is an inline image with a content ID, map it
+                        if attachment.get("is_inline") and attachment.get("content_id"):
+                            inline_image_map[attachment["content_id"]] = file_path
+                        
+                        print(f"Saved attachment to: {file_path}")
+                
+                # If we have HTML content and inline images, update the HTML to reference local files
+                if content.startswith("<!DOCTYPE html") or "<html" in content:
+                    for cid, file_path in inline_image_map.items():
+                        # Replace "cid:content_id" references with file paths
+                        content = content.replace(f'cid:{cid}', f'file://{file_path}')
+                    
+                    # Update the message content with the modified HTML
+                    message_content = f"Subject: {subject}\n\n{content}"
                 
                 # Create source keys for reference
                 source_keys = {
@@ -462,6 +481,7 @@ class EmailServiceMapper(ServiceMapperInterface):
                 
                 if file_paths:
                     source_keys["media_dir"] = os.path.join(self.media_dir, str(generated_message_id))
+                    source_keys["has_inline_images"] = bool(inline_image_map)
                 
                 # Generate source ID
                 source_id = get_source_id(sender_email)
@@ -492,6 +512,116 @@ class EmailServiceMapper(ServiceMapperInterface):
             print(f"Error getting new messages: {e}")
             return []
 
+
+    def _extract_email_content(self, msg):
+        """Extract email content and attachments, including inline images
+        
+        Args:
+            msg: Email message object
+            
+        Returns:
+            tuple: (content, attachments)
+                - content: String with email body
+                - attachments: List of dictionaries with attachment info
+        """
+        content = ""
+        html_content = ""
+        attachments = []
+        
+        # Process each part of the email
+        if msg.is_multipart():
+            # Handle multipart messages
+            for part in msg.walk():
+                content_type = part.get_content_type()
+                content_disposition = str(part.get("Content-Disposition"))
+                
+                # Get the content ID for potential inline images
+                content_id = part.get("Content-ID")
+                if content_id:
+                    # Remove angle brackets if present
+                    content_id = content_id.strip("<>")
+                
+                # Handle text content
+                if content_type == "text/plain" and "attachment" not in content_disposition:
+                    try:
+                        part_content = part.get_payload(decode=True)
+                        if part_content:
+                            part_content = part_content.decode(errors='replace')
+                            content += part_content
+                    except Exception as e:
+                        print(f"Error decoding plain text: {e}")
+                
+                # Handle HTML content
+                elif content_type == "text/html" and "attachment" not in content_disposition:
+                    try:
+                        part_content = part.get_payload(decode=True)
+                        if part_content:
+                            part_content = part_content.decode(errors='replace')
+                            html_content = part_content
+                    except Exception as e:
+                        print(f"Error decoding HTML: {e}")
+                
+                # Handle inline images (they typically have Content-ID and no Content-Disposition or are inline)
+                elif content_type.startswith("image/") and (content_id or "inline" in content_disposition):
+                    try:
+                        filename = part.get_filename()
+                        if not filename:
+                            # Generate filename for inline images without names
+                            ext = content_type.split('/')[1]
+                            filename = f"inline_image_{len(attachments)}.{ext}"
+                        
+                        # Store inline image data
+                        image_data = part.get_payload(decode=True)
+                        
+                        # Add to attachments
+                        attachments.append({
+                            "filename": filename,
+                            "data": image_data,
+                            "content_type": content_type,
+                            "is_inline": True,
+                            "content_id": content_id
+                        })
+                    except Exception as e:
+                        print(f"Error processing inline image: {e}")
+                
+                # Handle regular attachments
+                elif "attachment" in content_disposition or content_type.startswith(("application/", "image/", "audio/", "video/")):
+                    try:
+                        filename = part.get_filename()
+                        if filename:
+                            # Try to decode the filename if needed
+                            if decode_header(filename)[0][1] is not None:
+                                filename = decode_header(filename)[0][0].decode(decode_header(filename)[0][1])
+                            
+                            attachment_data = part.get_payload(decode=True)
+                            if attachment_data:
+                                attachments.append({
+                                    "filename": filename,
+                                    "data": attachment_data,
+                                    "content_type": content_type,
+                                    "is_inline": False
+                                })
+                    except Exception as e:
+                        print(f"Error processing attachment: {e}")
+        else:
+            # Handle non-multipart messages (simple text)
+            content_type = msg.get_content_type()
+            if content_type == "text/plain":
+                try:
+                    content = msg.get_payload(decode=True).decode(errors='replace')
+                except Exception as e:
+                    print(f"Error decoding non-multipart message: {e}")
+            elif content_type == "text/html":
+                try:
+                    html_content = msg.get_payload(decode=True).decode(errors='replace')
+                except Exception as e:
+                    print(f"Error decoding HTML message: {e}")
+        
+        # Prefer HTML content if available, otherwise use plain text
+        final_content = html_content if html_content else content
+        
+        return final_content, attachments
+    
     async def reply_to_message(self, message: UnifiedMessageFormat, reply_content: str) -> str:
         """Reply to an email message"""
         if not await self.is_logged_in():
@@ -578,7 +708,7 @@ async def main():
     # Set up email parameters
     email = os.getenv("EMAIL_ADDRESS")
     password = os.getenv("EMAIL_PASSWORD")
-    media_dir = "email_attachments"
+    media_dir = "media"
     
     if not os.path.exists(media_dir):
         os.makedirs(media_dir)
