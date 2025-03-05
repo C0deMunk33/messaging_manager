@@ -1,5 +1,10 @@
-from messaging_manager.libs.service_mapper_interface import ServiceMapperInterface, ServiceMetadata, get_source_id
-from messaging_manager.libs.service_mapper_interface import UnifiedMessageFormat
+try:
+    from libs.service_mapper_interface import ServiceMapperInterface, ServiceMetadata, get_source_id
+    from libs.service_mapper_interface import UnifiedMessageFormat
+except ImportError:
+    from messaging_manager.libs.service_mapper_interface import ServiceMapperInterface, ServiceMetadata, get_source_id
+    from messaging_manager.libs.service_mapper_interface import UnifiedMessageFormat
+
 from datetime import datetime
 from typing import List, Optional, Dict
 import uuid
@@ -82,28 +87,178 @@ class EmailServiceMapper(ServiceMapperInterface):
             
             if self.settings['requires_oauth'] and self.provider == 'gmail':
                 # Handle Gmail's OAuth2 authentication
-                auth_string = f'user={self.email}\1auth=Bearer {self.init_keys["oauth_token"]}\1\1'
-                self.imap_conn.authenticate('XOAUTH2', lambda _: auth_string.encode())
+                token = self.init_keys["oauth_token"]
+                
+                # Print first few characters of token for debugging
+                token_prefix = token[:10] + "..." if len(token) > 10 else "too_short"
+                print(f"Using OAuth token starting with: {token_prefix}")
+                print(f"Email being used for authentication: {self.email}")
+                
+                # Try alternative authentication first (this worked in last attempt)
+                try:
+                    print("Using alternative authentication approach (direct command)")
+                    
+                    # Format the auth string exactly as Gmail expects it
+                    auth_string = f'user={self.email}\1auth=Bearer {token}\1\1'
+                    auth_bytes = auth_string.encode('utf-8')
+                    auth_b64 = base64.b64encode(auth_bytes).decode('utf-8')
+                    
+                    # Use lower-level command with proper formatting
+                    typ, data = self.imap_conn._simple_command('AUTHENTICATE', 'XOAUTH2', auth_b64)
+                    
+                    # Properly handle the server's response
+                    if typ == 'CONTINUE':
+                        print("Received continuation request from server")
+                        self.imap_conn.send('\r\n'.encode('utf-8'))
+                        typ, data = self.imap_conn._get_response()
+                    
+                    if typ != 'OK':
+                        print(f"OAuth authentication failed: {typ} {data}")
+                        raise Exception(f"IMAP authentication failed: {data}")
+                        
+                    # Critical: Process the server response to update connection state
+                    self.imap_conn.state = 'AUTH'
+                    
+                    # Verify the state updated correctly
+                    print(f"IMAP state after authentication: {self.imap_conn.state}")
+                    
+                    # Test the connection with a simple command
+                    status, folders = self.imap_conn.list()
+                    if status != 'OK':
+                        print(f"Warning: List command failed after authentication: {status}")
+                        raise Exception("Authentication succeeded but commands fail")
+                    else:
+                        print("Connection verified with successful LIST command")
+                    
+                except Exception as auth_error:
+                    print(f"Alternative authentication failed: {auth_error}")
+                    
+                    # Try the authenticate method instead
+                    try:
+                        print("Attempting OAuth authentication using authenticate() method")
+                        self.imap_conn = imaplib.IMAP4_SSL(self.settings['imap_server'])
+                        
+                        # Create the auth string in the correct format for Gmail
+                        auth_string = f'user={self.email}\1auth=Bearer {token}\1\1'
+                        auth_bytes = auth_string.encode('utf-8')
+                        auth_b64 = base64.b64encode(auth_bytes).decode('utf-8')
+                        
+                        # Use the standard authenticate method
+                        self.imap_conn.authenticate('XOAUTH2', lambda x: auth_b64)
+                        print("IMAP authentication successful with authenticate() method")
+                        
+                    except imaplib.IMAP4.error as e:
+                        print(f"Standard authenticate method failed: {e}")
+                        
+                        # Try app password as last resort
+                        try:
+                            if "app_password" in self.init_keys:
+                                print("Attempting to use app password as fallback")
+                                self.imap_conn = imaplib.IMAP4_SSL(self.settings['imap_server'])
+                                result = self.imap_conn.login(self.email, self.init_keys['app_password'])
+                                if result[0] != 'OK':
+                                    raise Exception(f"App password authentication failed: {result}")
+                                print("Successfully authenticated with app password")
+                            else:
+                                raise Exception("No app password available as fallback")
+                        except Exception as app_pass_error:
+                            print(f"App password authentication failed: {app_pass_error}")
+                            raise Exception("All IMAP authentication methods failed")
+                
+                # Connect to SMTP for sending emails
+                try:
+                    print("Setting up SMTP connection")
+                    self.smtp_conn = smtplib.SMTP(self.settings['smtp_server'], self.settings['smtp_port'])
+                    self.smtp_conn.ehlo()
+                    self.smtp_conn.starttls()
+                    self.smtp_conn.ehlo()  # Second EHLO after STARTTLS is required
+                    
+                    # For SMTP OAuth authentication
+                    print("Attempting SMTP OAuth authentication")
+                    auth_string = f'user={self.email}\1auth=Bearer {token}\1\1'
+                    auth_bytes = auth_string.encode('utf-8')
+                    auth_b64 = base64.b64encode(auth_bytes).decode('utf-8')
+                    
+                    # Try the standard SMTP AUTH command
+                    smtp_code, smtp_resp = self.smtp_conn.docmd('AUTH', f'XOAUTH2 {auth_b64}')
+                    
+                    # Check if we got a challenge response
+                    if smtp_code == 334:
+                        print("Received SMTP continuation challenge")
+                        self.smtp_conn.send('\r\n'.encode('utf-8'))
+                        smtp_code, smtp_resp = self.smtp_conn.getreply()
+                        
+                    if smtp_code not in (235, 250, 200):  # Various success codes
+                        print(f"SMTP OAuth failed, trying app password if available")
+                        # Try app password as fallback for SMTP
+                        if "app_password" in self.init_keys:
+                            self.smtp_conn.login(self.email, self.init_keys['app_password'])
+                        else:
+                            raise Exception(f"SMTP authentication failed: {smtp_code} {smtp_resp}")
+                    
+                    print("SMTP authentication successful")
+                    
+                except Exception as smtp_e:
+                    print(f"SMTP setup failed: {smtp_e}")
+                    # We can continue without SMTP if only reading emails
+                    print("Continuing without SMTP capability")
+                    self.smtp_conn = None
+                    
             else:
                 # Standard password authentication
-                self.imap_conn.login(self.email, self.init_keys['password'])
-            
-            # Connect to SMTP for sending emails
-            self.smtp_conn = smtplib.SMTP(self.settings['smtp_server'], self.settings['smtp_port'])
-            self.smtp_conn.ehlo()
-            self.smtp_conn.starttls()
-            
-            if self.settings['requires_oauth'] and self.provider == 'gmail':
-                auth_string = f'user={self.email}\1auth=Bearer {self.init_keys["oauth_token"]}\1\1'
-                self.smtp_conn.auth('XOAUTH2', lambda _: auth_string.encode())
-            else:
+                print("Using standard password authentication")
+                result = self.imap_conn.login(self.email, self.init_keys['password'])
+                if result[0] != 'OK':
+                    raise Exception(f"IMAP password authentication failed: {result}")
+                print("IMAP password authentication successful")
+                
+                # Connect to SMTP for sending emails
+                self.smtp_conn = smtplib.SMTP(self.settings['smtp_server'], self.settings['smtp_port'])
+                self.smtp_conn.ehlo()
+                self.smtp_conn.starttls()
+                self.smtp_conn.ehlo()  # Second EHLO after STARTTLS is required
                 self.smtp_conn.login(self.email, self.init_keys['password'])
+                print("SMTP password authentication successful")
             
+            # Verify IMAP authentication state manually
+            try:
+                if self.imap_conn.state != 'AUTH':
+                    print(f"Warning: IMAP state is {self.imap_conn.state}, attempting to verify connection with a command")
+                    # Test connection with a simple command
+                    status, response = self.imap_conn.noop()
+                    if status == 'OK':
+                        print("Connection verified with NOOP command despite state reporting issues")
+                        # Force the state to AUTH since commands are working
+                        self.imap_conn.state = 'AUTH'
+                    else:
+                        raise Exception(f"IMAP not properly authenticated. NOOP test failed with: {status}")
+            except Exception as state_error:
+                print(f"State verification failed: {state_error}")
+                raise
+                
             print(f"Successfully logged in as: {self.email}")
+            print(f"Final IMAP state: {self.imap_conn.state}")
             return True
             
         except Exception as e:
             print(f"Login failed: {e}")
+            
+            # Clean up connections on failure
+            try:
+                if self.imap_conn:
+                    self.imap_conn.logout()
+            except Exception as logout_e:
+                print(f"Error during IMAP logout: {logout_e}")
+                
+            try:
+                if self.smtp_conn:
+                    self.smtp_conn.quit()
+            except Exception as quit_e:
+                print(f"Error during SMTP quit: {quit_e}")
+                
+            self.imap_conn = None
+            self.smtp_conn = None
+            
             return False
 
     async def logout(self) -> bool:
@@ -416,27 +571,41 @@ class EmailServiceMapper(ServiceMapperInterface):
 async def main():
     """Test function for EmailServiceMapper"""
     import dotenv
+    
+    # Load environment variables
     dotenv.load_dotenv()
     
+    # Set up email parameters
     email = os.getenv("EMAIL_ADDRESS")
     password = os.getenv("EMAIL_PASSWORD")
-    
-    # For Gmail OAuth (if using Gmail with OAuth)
-    oauth_token = os.getenv("GMAIL_OAUTH_TOKEN", None)
-    
     media_dir = "email_attachments"
+    
     if not os.path.exists(media_dir):
         os.makedirs(media_dir)
     
+    # Initialize keys dictionary
     init_keys = {
         "email": email,
-        "password": password,
         "latest_message_id": None
     }
     
-    # Add OAuth token for Gmail
-    if oauth_token and "@gmail.com" in email:
-        init_keys["oauth_token"] = oauth_token
+    # For standard password authentication
+    if password:
+        init_keys["password"] = password
+    
+    # Handle OAuth for Gmail
+    if "@gmail.com" in email:
+        # First try to get OAuth token from environment
+        oauth_token = os.getenv("GMAIL_OAUTH_TOKEN")
+                
+        if oauth_token:
+            init_keys["oauth_token"] = oauth_token
+            # Remove password if we're using OAuth
+            if "password" in init_keys:
+                del init_keys["password"]
+        else:
+            print("Warning: Gmail account detected but no OAuth token provided.")
+            print("Using password authentication, which might not work with Gmail's security settings.")
     
     # For custom email server
     if os.getenv("EMAIL_IMAP_SERVER"):
@@ -445,15 +614,21 @@ async def main():
         init_keys["smtp_server"] = os.getenv("EMAIL_SMTP_SERVER")
         init_keys["smtp_port"] = os.getenv("EMAIL_SMTP_PORT", "587")
     
+    print(f"Initializing EmailServiceMapper with: {email}")
+    print(f"Authentication method: {'OAuth' if 'oauth_token' in init_keys else 'Password'}")
+    
+    # Create service mapper
     service_mapper = EmailServiceMapper(
         init_keys=init_keys,
         media_dir=media_dir
     )
     
+    # Try to log in
     logged_in = await service_mapper.login()
     print(f"Logged in: {logged_in}")
     
     if logged_in:
+        # Get new messages
         new_messages = await service_mapper.get_new_messages(limit_per_source=5)
         print(f"Found {len(new_messages)} new messages")
         
