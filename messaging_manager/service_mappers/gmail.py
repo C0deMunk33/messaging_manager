@@ -20,15 +20,16 @@ import asyncio
 import base64
 import re
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import traceback
 class GmailServiceMapper(ServiceMapperInterface):
     def __init__(self, init_keys: dict[str, str], media_dir: str = None):
         super().__init__()
         self.init_keys = init_keys
         self.media_dir = media_dir
-        self.latest_message_id = self.init_keys.get('latest_message_id', None)
-        
+        self.latest_message_timestamp = self.init_keys.get('latest_message_timestamp', datetime.now() - timedelta(days=30))
+        self.latest_message_ids = {}
+
         # IMAP settings for different providers
         self.provider_settings = {
             'gmail': {
@@ -290,12 +291,19 @@ class GmailServiceMapper(ServiceMapperInterface):
 
     def process_emails(self, email_ids: List[str], box: str) -> List[UnifiedMessageFormat]:
         results = []
-        for email_id in email_ids:
+        for email_id in sorted(email_ids, key=lambda x: int(x)):
                 # Convert bytes to string if needed
                 if isinstance(email_id, bytes):
                     email_id_str = email_id.decode('utf-8')
                 else:
                     email_id_str = str(email_id)
+
+                if box not in self.latest_message_ids:
+                    self.latest_message_ids[box] = int(email_id)
+                elif int(email_id) <= self.latest_message_ids[box]:
+                    continue
+                else:
+                    self.latest_message_ids[box] = int(email_id)
 
                 generated_email_id = hashlib.sha256(f"{box} {email_id_str}".encode()).hexdigest()
                 media_dir = os.path.join(self.media_dir, generated_email_id)
@@ -447,6 +455,7 @@ class GmailServiceMapper(ServiceMapperInterface):
                     # if the media_dir exists, is empty, remove it
                     if not os.listdir(media_dir):
                         os.rmdir(media_dir)
+
                     
                 # Create unified message format
                 unified_message = UnifiedMessageFormat(
@@ -463,6 +472,10 @@ class GmailServiceMapper(ServiceMapperInterface):
                     message_timestamp=email.utils.parsedate_to_datetime(message['Date']) if message['Date'] else datetime.now(),
                     file_paths=file_paths
                 )
+
+                # if the message_timestamp is greater than the latest_message_timestamp, update the latest_message_timestamp
+                if unified_message.message_timestamp.replace(tzinfo=timezone.utc) > self.latest_message_timestamp.replace(tzinfo=timezone.utc):
+                    self.latest_message_timestamp = unified_message.message_timestamp
                 
                 # Add to results
                 results.append(unified_message)
@@ -483,21 +496,22 @@ class GmailServiceMapper(ServiceMapperInterface):
             await self.login()
             
         results = []
-        
+        min_date = self.latest_message_timestamp
         # Default to checking the last 30 days if no latest message
         from datetime import timedelta
-        min_date = datetime.now() - timedelta(days=30)
         if latest_message:
             min_date = latest_message.message_timestamp
 
         try:
+            latest_date_str = min_date.strftime("%d-%b-%Y")
             # Process Sent folder
             status, message_count = self.imap_conn.select('"[Gmail]/Sent Mail"')
             if status != 'OK':
                 print(f"Failed to select Sent: {message_count}")
                 return results
             
-            status, data = self.imap_conn.search(None, f'SINCE {min_date.strftime("%d-%b-%Y")}')
+            print(f"Searching for emails since {latest_date_str}")
+            status, data = self.imap_conn.search(None, f'(SINCE "{latest_date_str}")')
             if status != 'OK':
                 print(f"Failed to search for emails: {data}")
                 return results
@@ -513,7 +527,7 @@ class GmailServiceMapper(ServiceMapperInterface):
                 return results
                 
             # Search with SINCE criterion
-            status, data = self.imap_conn.search(None, f'SINCE {min_date.strftime("%d-%b-%Y")}')
+            status, data = self.imap_conn.search(None, f'(SINCE "{latest_date_str}")')
             if status != 'OK':
                 print(f"Failed to search for emails: {data}")
                 return results
@@ -575,7 +589,7 @@ class GmailServiceMapper(ServiceMapperInterface):
 
     async def get_service_metadata(self) -> ServiceMetadata:
         """Get service metadata for email"""
-        required_keys = ["email", "password",  "latest_message_id"]
+        required_keys = ["email", "password",  "latest_message_timestamp"]
         
         # Add OAuth token for Gmail
         if self.provider == 'gmail':
@@ -587,7 +601,7 @@ class GmailServiceMapper(ServiceMapperInterface):
         
         # Create reinitialize keys
         reinitialize_keys = {
-            "latest_message_id": self.latest_message_id,
+            "latest_message_timestamp": self.latest_message_timestamp,
             "email": self.email,
             "provider": self.provider
         }
@@ -621,8 +635,8 @@ async def main():
     dotenv.load_dotenv()
     
     # Set up email parameters
-    email = os.getenv("EMAIL_ADDRESS")
-    password = os.getenv("EMAIL_PASSWORD")
+    email = os.getenv("GMAIL_EMAIL")
+    password = os.getenv("GMAIL_PASSWORD")
     media_dir = "media"
     
     if not os.path.exists(media_dir):
@@ -631,7 +645,7 @@ async def main():
     # Initialize keys dictionary
     init_keys = {
         "email": email,
-        "latest_message_id": None
+        "latest_message_timestamp": datetime.now() - timedelta(days=30)
     }
     
     # For standard password authentication
@@ -670,12 +684,14 @@ async def main():
     await service_mapper.logout()
     # Try to log in
     logged_in = await service_mapper.login()
-    print(f"Logged in: {logged_in}")
     
     if logged_in:
+        print(f"Logged in: {logged_in}")
+        print("latest_message_timestamp", service_mapper.latest_message_timestamp)
         # Get new messages
         new_messages = await service_mapper.get_new_messages(limit_per_source=5)
         print(f"Found {len(new_messages)} new messages")
+        print("latest_message_timestamp", service_mapper.latest_message_timestamp)
         
         # save new_messages to file
         with open("test_messages.json", "w") as f:
@@ -683,8 +699,15 @@ async def main():
         
         metadata = await service_mapper.get_service_metadata()
         print(f"Service metadata: {metadata}")
-        
+
         await service_mapper.logout()
+
+    await service_mapper.login()
+    if await service_mapper.is_logged_in(): 
+        # Get new messages
+        new_messages = await service_mapper.get_new_messages(limit_per_source=5)
+        print(f"Found {len(new_messages)} new messages")
+        print("latest_message_timestamp", service_mapper.latest_message_timestamp)
 
 if __name__ == "__main__":
     asyncio.run(main())
