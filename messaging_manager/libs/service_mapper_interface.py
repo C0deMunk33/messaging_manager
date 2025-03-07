@@ -13,7 +13,7 @@ class UnifiedMessageFormat(SQLModel, table=True):
     service_name: str # the name of the service that the message is from
     source_id: str # the id of the source, this is a hash of the source_keys
     source_keys: Dict[str, str] | None = Field(default={}, sa_column=Column(JSON)) # all the keys that are needed to identify the message, channel, guild, etc.
-    message_content: str # the content of the message
+    message_content: Optional[str] = Field(default=None) # the content of the message
     sender_id: str # the id of the sender
     sender_name: str # the name of the sender at time of retrieval
     message_timestamp: datetime # the timestamp of the message

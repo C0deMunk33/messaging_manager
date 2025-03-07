@@ -113,6 +113,14 @@ class LoopManager:
                 latest_messages.extend(await service_mapper.get_new_messages(latest_message, limit_per_source=25))
                 await service_mapper.logout()
             
+            # get the messages from all the message ids
+            message_ids = [message.message_id for message in latest_messages]
+            existing_messages = session.exec(select(UnifiedMessageFormat)
+                                            .where(UnifiedMessageFormat.message_id.in_(message_ids))).all()
+            existing_message_ids = [message.message_id for message in existing_messages]
+            # NOTE: this will only add new messages to the database, it will not update the latest message id for the service mapper
+            latest_messages = [message for message in latest_messages if message.message_id not in existing_message_ids]
+            
             session.add_all(latest_messages)
             session.commit()
         return latest_messages
