@@ -6,6 +6,8 @@ import difflib
 import base64
 import re
 import traceback
+import json
+from datetime import datetime
 
 def call_ollama_chat(server_url, model, messages, json_schema=None, temperature=None, tools=None):
     try:
@@ -48,21 +50,31 @@ def call_ollama_vision(server_url, model,  messages, json_schema=None, temperatu
         host=server_url
     )
 
-    response = client.chat(
-        #model="minicpm-v",
-        #model="llava:34b",
-        model=model,
-        messages=[m.chat_ml() for m in messages],
-        format=json_schema,
+    try:
+        response = client.chat(
+            #model="minicpm-v",
+            #model="llava:34b",
+            model=model,
+            messages=[m.chat_ml() for m in messages],
+            format=json_schema,
         tools=tools,
         options={
             'num_ctx':10000,
             'seed': random.randint(0, 1000000)
-        }
-    )
+        })
 
-    return response.message.content
-
+        return response.message.content
+    
+    except Exception as error:
+        print("~~~~~~~~~~~~~~~~~~~~~~~")
+        print("Error")
+        print(error)
+        # print the stack trace
+        print(traceback.format_exc())
+        print("~~~~~~~~~~~~~~~~~~~~~~~")
+        print(messages)
+        print("~~~~~~~~~~~~~~~~~~~~~~~")
+        return error
 def embed_with_ollama(server_url, text, model="nomic-embed-text"):
     client = Client(
         host=server_url
@@ -170,5 +182,11 @@ def is_base64(string):
         return False
 
 
+
+class DateTimeEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        return super().default(obj)
 
 

@@ -7,20 +7,25 @@ from messaging_manager.service_mappers.telegram import TelegramServiceMapper
 from messaging_manager.service_mappers.gmail import GmailServiceMapper
 from messaging_manager.libs.common import call_ollama_chat, Message, call_ollama_vision, ToolSchema
 import json
-from messaging_manager.libs.service_mapper_interface import ServiceMapperInterface, UnifiedMessageFormat
+from messaging_manager.libs.service_mapper_interface import ServiceMapperInterface
 from datetime import datetime, timedelta
 from sqlmodel import create_engine, Session, SQLModel, select
+import uuid
+from typing import List
+from sqlmodel import Field,  Column, JSON
+import hashlib
+from messaging_manager.libs.database_models import DraftResponse, UnifiedMessageFormat, ServiceMetadata
 
 def get_system_prompt():
     # TODO: add in extra context, like user name and profile
     return """You will be provided recent messages between User A and User B, your task is to determine if User A needs to respond next in the conversation and if so draft an appropriate response.
-    If you determine that User A does not need to respond, set the response_needed to False."""
+    If you determine that User A does not need to respond, set the response_suggested to False."""
 
-class DraftResponse(BaseModel):
+class DraftResponseSchema(BaseModel):
     thoughts: str
     summary_of_chat: str
     reasoning_for_decision: str
-    response_needed: bool
+    response_suggested: bool
     response: Optional[str] = None
 
 class ContextualCaption(BaseModel):
@@ -29,6 +34,7 @@ class ContextualCaption(BaseModel):
     detailed_description: str
     context: str
     final_description: str
+
 
 def get_contextual_caption(server_url, image_path, chat_context):
     # TODO call vision model to get a description of the image in context
@@ -128,17 +134,30 @@ class LoopManager:
     async def process_messages(self):
         # get all messages, group by source ID, limited to 25 messages per source
         with Session(self.db_engine) as session:
-            messages = select(UnifiedMessageFormat)
-            messages = session.exec(messages).all()
+            all_messages = select(UnifiedMessageFormat)
+            all_messages = session.exec(all_messages).all()
             messages_by_source_id = {}
-            for message in messages:
+            for message in all_messages:
                 if message.source_id not in messages_by_source_id:
                     messages_by_source_id[message.source_id] = []
                 messages_by_source_id[message.source_id].append(message)
                 if len(messages_by_source_id[message.source_id]) > 25:
                     messages_by_source_id[message.source_id].pop(0)
             
+            
+
             for source_id, messages in messages_by_source_id.items():
+                # sha256 hash the message ids
+                message_ids = [message.message_id for message in messages]
+                message_ids_hash = hashlib.sha256(json.dumps(message_ids).encode()).hexdigest()
+
+                # check if the draft response already exists, if the messages havent changed, we can skip the draft response
+                draft_response = session.exec(select(DraftResponse)
+                                            .where(DraftResponse.draft_response_id == message_ids_hash)).first()
+                if draft_response:
+                    print("Draft response already exists")
+                    continue
+
                 system_prompt = get_system_prompt()
                 user_prompt = """Please determine if User A needs to respond next in the conversion and if so draft an appropriate response.
                 If you determine that User A does not need to respond, set the response_needed to False.
@@ -156,26 +175,45 @@ class LoopManager:
                     
                     for file_path in message.file_paths:
                         file_paths.append(file_path)
-                        caption = get_contextual_caption(self.server_url, file_path, user_prompt)
-                        user_prompt += f"{user_name}: shared an image. Description: [{caption}]\n"
+                        if file_path.endswith(".jpg") or file_path.endswith(".png"):    
+                            caption = get_contextual_caption(self.server_url, file_path, user_prompt)
+                            user_prompt += f"{user_name}: shared an image. Description: [{caption}]\n"
+                        elif file_path.endswith(".txt"):
+                            with open(file_path, "r") as f:
+                                user_prompt += f"{user_name}: shared a file. File content: [{f.read()}]\n"
+                        elif file_path.endswith(".mp4"):
+                            pass
+                        else:
+                            user_prompt += f"{user_name}: shared file: [{file_path}]\n"
                     
-                user_prompt += f"\nPlease respond with the following JSON format: \n{DraftResponse.model_json_schema()}"
+                user_prompt += f"\nPlease respond with the following JSON format: \n{DraftResponseSchema.model_json_schema()}"
 
                 ollama_messages = [Message(role="system", content=system_prompt)]
                 ollama_messages.append(Message(role="user", content=user_prompt))
 
-                response = call_ollama_chat(self.server_url, "Qwen2.5-14B-Instruct-1M-GGUF", ollama_messages, json_schema=DraftResponse.model_json_schema())
-                draft_response = DraftResponse.model_validate_json(response)    
+                response = call_ollama_chat(self.server_url, "Qwen2.5-14B-Instruct-1M-GGUF", ollama_messages, json_schema=DraftResponseSchema.model_json_schema())
+                parsed_draft_response = DraftResponseSchema.model_validate_json(response)    
 
+
+                
+
+                draft_response = DraftResponse(
+                    draft_response_id=message_ids_hash,
+                    messages=[message.model_dump(mode="json") for message in messages],
+                    thoughts=parsed_draft_response.thoughts,
+                    summary_of_chat=parsed_draft_response.summary_of_chat,
+                    reasoning_for_decision=parsed_draft_response.reasoning_for_decision,
+                    response_suggested=parsed_draft_response.response_suggested,
+                    response=parsed_draft_response.response,
+                    # pending if reponse is needed, ignored if not
+                    status="pending" if parsed_draft_response.response_suggested else "ignored"
+                )
                 print("~" * 100)
                 print("draft response:")
                 print(draft_response.model_dump_json(indent=4))
                 print("~" * 100)
-                if draft_response.response_needed:
-                    print("suggested response:")
-                    print(draft_response.response)
-                else:
-                    print("No response needed")
+                session.add(draft_response)
+                session.commit()
 
 # todo: embed the messages and the response
 # todo: save the embedding to a vector database
