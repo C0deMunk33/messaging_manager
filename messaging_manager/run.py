@@ -116,7 +116,7 @@ class LoopManager:
                                             .where(UnifiedMessageFormat.service_name == metadata.service_name)
                                             .order_by(UnifiedMessageFormat.message_timestamp.desc())).first()
 
-                latest_messages.extend(await service_mapper.get_new_messages(latest_message, limit_per_source=25))
+                latest_messages.extend(await service_mapper.get_new_messages(latest_message, limit_per_source=40))
                 await service_mapper.logout()
             
             # get the messages from all the message ids
@@ -132,7 +132,7 @@ class LoopManager:
         return latest_messages
     
     async def process_messages(self):
-        # get all messages, group by source ID, limited to 25 messages per source
+        # get all messages, group by source ID, limited to 40 messages per source
         with Session(self.db_engine) as session:
             all_messages = select(UnifiedMessageFormat)
             all_messages = session.exec(all_messages).all()
@@ -141,7 +141,7 @@ class LoopManager:
                 if message.source_id not in messages_by_source_id:
                     messages_by_source_id[message.source_id] = []
                 messages_by_source_id[message.source_id].append(message)
-                if len(messages_by_source_id[message.source_id]) > 25:
+                if len(messages_by_source_id[message.source_id]) > 40:
                     messages_by_source_id[message.source_id].pop(0)
             
             
@@ -173,9 +173,11 @@ class LoopManager:
                     
                     user_prompt += f"{user_name}: {message.message_content}\n"
                     
+                    image_extensions = [".jpg", ".png", ".JPG", ".PNG", ".jpeg", ".JPEG"]
+
                     for file_path in message.file_paths:
                         file_paths.append(file_path)
-                        if file_path.endswith(".jpg") or file_path.endswith(".png"):    
+                        if any(file_path.endswith(ext) for ext in image_extensions):    
                             caption = get_contextual_caption(self.server_url, file_path, user_prompt)
                             user_prompt += f"{user_name}: shared an image. Description: [{caption}]\n"
                         elif file_path.endswith(".txt"):
