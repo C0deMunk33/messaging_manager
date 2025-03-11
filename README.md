@@ -13,7 +13,7 @@ writing samples
 persona
 profiling
 vector memory
-UI
+graph memory
 
 
 # Service Keys:

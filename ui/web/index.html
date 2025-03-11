@@ -206,7 +206,24 @@
         }
 
         function approveDraftResponse(draftResponseId) {
-            const editedResponse = document.getElementById(`response-text-${draftResponseId}`).value;
+            const responseTextElement = document.getElementById(`response-text-${draftResponseId}`);
+            
+            if (!responseTextElement) {
+                console.error(`Could not find response text element for draft ${draftResponseId}`);
+                return;
+            }
+            
+            const editedResponse = responseTextElement.value;
+            
+            // Disable buttons during the request
+            const approveButton = document.querySelector(`#draft-${draftResponseId} .approve-btn`);
+            const ignoreButton = document.querySelector(`#draft-${draftResponseId} .ignore-btn`);
+            approveButton.disabled = true;
+            ignoreButton.disabled = true;
+            
+            // Show loading status
+            document.getElementById(`status-${draftResponseId}`).innerHTML = 
+                '<p>Processing approval...</p>';
             
             fetch(`/draft_responses/${draftResponseId}/approve`, {
                 method: 'POST',
@@ -215,55 +232,87 @@
                 },
                 body: JSON.stringify({ response: editedResponse })
             })
-            .then(response => response.json())
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(`Server returned ${response.status}: ${response.statusText}`);
+                }
+                return response.json();
+            })
             .then(data => {
-                document.getElementById(`status-${draftResponseId}`).innerHTML = 
-                    '<p class="approved">✓ Response approved successfully!</p>';
-                
-                // Disable the approve and ignore buttons
-                const approveButton = document.querySelector(`#draft-${draftResponseId} .approve-btn`);
-                const ignoreButton = document.querySelector(`#draft-${draftResponseId} .ignore-btn`);
-                approveButton.disabled = true;
-                ignoreButton.disabled = true;
-                approveButton.style.backgroundColor = '#6c757d';
-                ignoreButton.style.backgroundColor = '#6c757d';
-                approveButton.textContent = 'Approved';
-                
-                // Refresh the list after a short delay
-                setTimeout(fetchDraftResponses, 2000);
+                if (data.success) {
+                    document.getElementById(`status-${draftResponseId}`).innerHTML = 
+                        '<p class="approved">✓ Response approved successfully!</p>';
+                    
+                    // Update button styles
+                    approveButton.style.backgroundColor = '#6c757d';
+                    ignoreButton.style.backgroundColor = '#6c757d';
+                    approveButton.textContent = 'Approved';
+                    
+                    // Refresh the list after a short delay
+                    setTimeout(fetchDraftResponses, 2000);
+                } else {
+                    throw new Error(data.message || 'Unknown error occurred');
+                }
             })
             .catch(error => {
                 console.error('Error approving draft response:', error);
                 document.getElementById(`status-${draftResponseId}`).innerHTML = 
-                    '<p style="color: red;">Error approving response. Please try again.</p>';
+                    `<p style="color: red;">Error: ${error.message || 'Could not approve response'}</p>`;
+                
+                // Re-enable buttons
+                approveButton.disabled = false;
+                ignoreButton.disabled = false;
             });
         }
 
         function ignoreDraftResponse(draftResponseId) {
+            // Disable buttons during the request
+            const approveButton = document.querySelector(`#draft-${draftResponseId} .approve-btn`);
+            const ignoreButton = document.querySelector(`#draft-${draftResponseId} .ignore-btn`);
+            approveButton.disabled = true;
+            ignoreButton.disabled = true;
+            
+            // Show loading status
+            document.getElementById(`status-${draftResponseId}`).innerHTML = 
+                '<p>Processing ignore request...</p>';
+            
             fetch(`/draft_responses/${draftResponseId}/ignore`, {
                 method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({})
             })
-            .then(response => response.json())
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(`Server returned ${response.status}: ${response.statusText}`);
+                }
+                return response.json();
+            })
             .then(data => {
-                document.getElementById(`status-${draftResponseId}`).innerHTML = 
-                    '<p class="approved">✓ Response ignored</p>';
-                
-                // Disable the approve and ignore buttons
-                const approveButton = document.querySelector(`#draft-${draftResponseId} .approve-btn`);
-                const ignoreButton = document.querySelector(`#draft-${draftResponseId} .ignore-btn`);
-                approveButton.disabled = true;
-                ignoreButton.disabled = true;
-                approveButton.style.backgroundColor = '#6c757d';
-                ignoreButton.style.backgroundColor = '#6c757d';
-                ignoreButton.textContent = 'Ignored';
-                
-                // Refresh the list after a short delay
-                setTimeout(fetchDraftResponses, 2000);
+                if (data.success) {
+                    document.getElementById(`status-${draftResponseId}`).innerHTML = 
+                        '<p class="approved">✓ Response ignored</p>';
+                    
+                    // Update button styles
+                    approveButton.style.backgroundColor = '#6c757d';
+                    ignoreButton.style.backgroundColor = '#6c757d';
+                    ignoreButton.textContent = 'Ignored';
+                    
+                    // Refresh the list after a short delay
+                    setTimeout(fetchDraftResponses, 2000);
+                } else {
+                    throw new Error(data.message || 'Unknown error occurred');
+                }
             })
             .catch(error => {
                 console.error('Error ignoring draft response:', error);
                 document.getElementById(`status-${draftResponseId}`).innerHTML = 
-                    '<p style="color: red;">Error ignoring response. Please try again.</p>';
+                    `<p style="color: red;">Error: ${error.message || 'Could not ignore response'}</p>`;
+                
+                // Re-enable buttons
+                approveButton.disabled = false;
+                ignoreButton.disabled = false;
             });
         }
     </script>
