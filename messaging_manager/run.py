@@ -76,10 +76,9 @@ class LoopManager:
         gmail_oauth_token = os.getenv("GMAIL_OAUTH_TOKEN")
         session_key = "session one"
 
-        media_dir = "media"
+        self.media_dir = media_dir
     
         self.db_engine = db_engine
-        self.media_dir = media_dir
         self.service_mappers = [
             TelegramServiceMapper(
                 init_keys={"api_id": api_id, 
@@ -216,6 +215,59 @@ class LoopManager:
                 print("~" * 100)
                 session.add(draft_response)
                 session.commit()
+    
+    async def send_approved_response(self, draft_response_id: str, response_text: str):
+        """Send an approved response through the appropriate service mapper"""
+
+        with Session(self.db_engine) as session:
+            draft_response = session.exec(select(DraftResponse).where(
+                DraftResponse.draft_response_id == draft_response_id)).first()
+            
+            if not draft_response:
+                return {"success": False, "message": "Draft response not found"}
+            
+            # Get the first message to determine which service to use
+            if not draft_response.messages:
+                return {"success": False, "message": "No messages found in draft response"}
+            
+            # Parse the first message to get service details
+            first_message = UnifiedMessageFormat.model_validate(draft_response.messages[0])
+            service_name = first_message.service_name
+            source_id = first_message.source_id
+            
+            # Find the appropriate service mapper
+            service_mapper = None
+            for mapper in self.service_mappers:
+                metadata = await mapper.get_service_metadata()
+                if metadata.service_name == service_name:
+                    service_mapper = mapper
+                    break
+            
+            if not service_mapper:
+                return {"success": False, "message": f"Service mapper for {service_name} not found"}
+            
+            # Login to the service
+            if not await service_mapper.is_logged_in():
+                await service_mapper.login()
+            
+            # Send the message
+            try:
+                # reply_to_message(self, message: UnifiedMessageFormat, reply_content: str) -> str:
+                # should be the last message in the draft response
+                last_message = UnifiedMessageFormat.model_validate(draft_response.messages[-1])
+                result = await service_mapper.reply_to_message(last_message, response_text)
+                
+                # Update the draft response status
+                draft_response.status = "sent"
+                draft_response.response = response_text
+                session.add(draft_response)
+                session.commit()
+                
+                await service_mapper.logout()
+                return {"success": True, "message": "Response sent successfully"}
+            except Exception as e:
+                await service_mapper.logout()
+                return {"success": False, "message": f"Failed to send message: {str(e)}"}
 
 # todo: embed the messages and the response
 # todo: save the embedding to a vector database
@@ -223,37 +275,49 @@ class LoopManager:
 
 async def pull_loop(engine, loop_manager: LoopManager):
     await loop_manager.pull_latest_messages()
-       
 
-if __name__ == "__main__":
+# Create a global instance of LoopManager
+def get_loop_manager():
     media_dir = "media"
-    if os.path.exists(media_dir):
-        shutil.rmtree(media_dir)
-    os.makedirs(media_dir)
+    if not os.path.exists(media_dir):
+        os.makedirs(media_dir)
+    
+    engine = create_engine("sqlite:///messages.db")
+    SQLModel.metadata.create_all(engine)
+    
+    return LoopManager(engine, media_dir)
 
-    # delete the messages.db file
-    if os.path.exists("messages.db"):
-        os.remove("messages.db")
+# Global instance for server use
+loop_manager = None
 
+async def run_continuous_loop(interval_seconds=300):
+    """Run the message processing loop continuously with a specified interval"""
     engine = create_engine("sqlite:///messages.db")
     SQLModel.metadata.create_all(engine)
     
     loop_manager = LoopManager(engine, "media")
-    asyncio.run(pull_loop(engine, loop_manager))
+    
+    while True:
+        try:
+            print(f"Running message pull and processing cycle at {datetime.now()}")
+            await loop_manager.pull_latest_messages()
+            
+            # Get message count from sqlite db
+            with Session(engine) as session:
+                messages = select(UnifiedMessageFormat)
+                message_count = session.exec(messages).all()
+                print(f"Message count: {len(message_count)}")
+            
+            await loop_manager.process_messages()
+            print(f"Completed processing cycle, waiting {interval_seconds} seconds until next cycle")
+        except Exception as e:
+            print(f"Error in processing cycle: {str(e)}")
+        
+        # Wait for the next cycle
+        await asyncio.sleep(interval_seconds)
 
-    # get message count from sqlite db
-    with Session(engine) as session:
-        messages = select(UnifiedMessageFormat)
-        message_count = session.exec(messages).all()
-        print(f"Message count: {len(message_count)}")
-
-    asyncio.run(pull_loop(engine, loop_manager))
-
-    with Session(engine) as session:
-        messages = select(UnifiedMessageFormat)
-        message_count = session.exec(messages).all()
-        print(f"Message count: {len(message_count)}")
-
-    asyncio.run(loop_manager.process_messages())
+if __name__ == "__main__":
+    # Run the continuous loop
+    asyncio.run(run_continuous_loop())
 
    
