@@ -80,21 +80,23 @@ class LoopManager:
     
         self.db_engine = db_engine
         self.service_mappers = [
-            TelegramServiceMapper(
-                init_keys={"api_id": api_id, 
-                        "api_hash": api_hash, 
-                        "latest_message_id": 0, 
-                        "session_name": session_key},
-                media_dir=media_dir
-            ),
             GmailServiceMapper(
                 init_keys={"email": email_address, 
                         "password": password,
                         "credentials_file_path": gmail_credentials_file_path,
                         "latest_message_timestamp": datetime.now() - timedelta(days=30)},
                 media_dir=media_dir
-            )
+            )            
         ]
+
+        """
+        TelegramServiceMapper(
+            init_keys={"api_id": api_id, 
+                    "api_hash": api_hash, 
+                    "latest_message_id": 0, 
+                    "session_name": session_key},
+            media_dir=media_dir
+        ),"""
   
     def add_service_mapper(self, service_mapper: ServiceMapperInterface):
         self.service_mappers.append(service_mapper)

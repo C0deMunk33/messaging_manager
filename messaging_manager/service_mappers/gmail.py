@@ -575,10 +575,12 @@ class GmailServiceMapper(ServiceMapperInterface):
             msg["To"] = message.sender_id
             msg["Subject"] = subject
             
-            # Add In-Reply-To header if we have the original Message-ID
-            if "message_id" in message.source_keys:
-                msg["In-Reply-To"] = message.source_keys["message_id"]
-                msg["References"] = message.source_keys["message_id"]
+            message_to_reply_to = message.source_keys.get("email_id", "")
+            box_name = message.source_keys.get("box", "") # inbox, sent, etc
+            
+            if message_to_reply_to and box_name:
+                msg["In-Reply-To"] = f"<{message_to_reply_to}@{box_name}>"
+                msg["References"] = f"<{message_to_reply_to}@{box_name}>"            
             
             # Add text content
             msg.attach(MIMEText(reply_content, "plain"))
@@ -678,7 +680,7 @@ async def main():
         init_keys["smtp_port"] = os.getenv("EMAIL_SMTP_PORT", "587")
     
     print(f"Initializing GmailServiceMapper with: {email}")
-    print(f"Authentication method: {'OAuth' if 'oauth_token' in init_keys else 'Password'}")
+    print(f"Authentication method: {'OAuth' if 'credentials_file_path' in init_keys else 'Password'}")
     
     # Create service mapper
     service_mapper = GmailServiceMapper(
