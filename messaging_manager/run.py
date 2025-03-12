@@ -73,7 +73,7 @@ class LoopManager:
 
         email_address = os.getenv("GMAIL_EMAIL")
         password = os.getenv("GMAIL_PASSWORD")
-        gmail_oauth_token = os.getenv("GMAIL_OAUTH_TOKEN")
+        gmail_credentials_file_path = os.getenv("GMAIL_CREDENTIALS_FILE_PATH")
         session_key = "session one"
 
         self.media_dir = media_dir
@@ -90,7 +90,7 @@ class LoopManager:
             GmailServiceMapper(
                 init_keys={"email": email_address, 
                         "password": password,
-                        "oauth_token": gmail_oauth_token,
+                        "credentials_file_path": gmail_credentials_file_path,
                         "latest_message_timestamp": datetime.now() - timedelta(days=30)},
                 media_dir=media_dir
             )
@@ -161,6 +161,8 @@ class LoopManager:
                 user_prompt = """Please determine if User A needs to respond next in the conversion and if so draft an appropriate response.
                 If you determine that User A does not need to respond, set the response_needed to False.
                 """
+
+                # TODO: pull in writing samples from stored messages
 
                 file_paths = []
                 for message in messages:

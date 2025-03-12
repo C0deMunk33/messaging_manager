@@ -1,9 +1,11 @@
 try:
     from libs.service_mapper_interface import ServiceMapperInterface, ServiceMetadata, get_source_id
     from libs.service_mapper_interface import UnifiedMessageFormat
+    from libs.gmail_oauth_utils import get_gmail_oauth_token
 except ImportError:
     from messaging_manager.libs.service_mapper_interface import ServiceMapperInterface, ServiceMetadata, get_source_id
     from messaging_manager.libs.service_mapper_interface import UnifiedMessageFormat
+    from messaging_manager.libs.gmail_oauth_utils import get_gmail_oauth_token
 
 from datetime import datetime
 from typing import List, Optional, Dict
@@ -22,6 +24,8 @@ import re
 import json
 from datetime import datetime, timedelta, timezone
 import traceback
+
+
 class GmailServiceMapper(ServiceMapperInterface):
     def __init__(self, init_keys: dict[str, str], media_dir: str = None):
         super().__init__()
@@ -29,7 +33,8 @@ class GmailServiceMapper(ServiceMapperInterface):
         self.media_dir = media_dir
         self.latest_message_timestamp = self.init_keys.get('latest_message_timestamp', datetime.now() - timedelta(days=30))
         self.latest_message_ids = {}
-
+        # TODO: run get_gmail_oauth_token rather than using the env variable
+        self.oauth_token = get_gmail_oauth_token(self.init_keys["credentials_file_path"])
         # IMAP settings for different providers
         self.provider_settings = {
             'gmail': {
@@ -89,7 +94,7 @@ class GmailServiceMapper(ServiceMapperInterface):
             
             if self.settings['requires_oauth'] and self.provider == 'gmail':
                 # Handle Gmail's OAuth2 authentication
-                token = self.init_keys["oauth_token"]
+                token = self.oauth_token
                 
                 # Print first few characters of token for debugging
                 token_prefix = token[:10] + "..." if len(token) > 10 else "too_short"
@@ -593,7 +598,7 @@ class GmailServiceMapper(ServiceMapperInterface):
         
         # Add OAuth token for Gmail
         if self.provider == 'gmail':
-            required_keys.append("oauth_token")
+            required_keys.append("credentials_file_path")
         
         # Add custom server settings for generic provider
         if self.provider == 'generic':
@@ -611,8 +616,8 @@ class GmailServiceMapper(ServiceMapperInterface):
             reinitialize_keys["password"] = self.init_keys["password"]
             
         # Add OAuth token if available
-        if "oauth_token" in self.init_keys:
-            reinitialize_keys["oauth_token"] = self.init_keys["oauth_token"]
+        if "credentials_file_path" in self.init_keys:
+            reinitialize_keys["credentials_file_path"] = self.init_keys["credentials_file_path"]
             
         # Add custom server settings if generic
         if self.provider == 'generic':
@@ -654,11 +659,10 @@ async def main():
     
     # Handle OAuth for Gmail
     if "@gmail.com" in email:
-        # First try to get OAuth token from environment
-        oauth_token = os.getenv("GMAIL_OAUTH_TOKEN")
-                
-        if oauth_token:
-            init_keys["oauth_token"] = oauth_token
+        # First try to get OAuth token from environment        
+        credentials_file_path = os.getenv("GMAIL_CREDENTIALS_FILE_PATH")
+        if credentials_file_path:
+            init_keys["credentials_file_path"] = credentials_file_path
             # Remove password if we're using OAuth
             if "password" in init_keys:
                 del init_keys["password"]

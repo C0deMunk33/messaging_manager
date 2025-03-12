@@ -50,18 +50,5 @@ go Here: https://my.telegram.org/apps
    - Click "Audience"
    - Under "Test users" click "+ Add Users"
    - Add your email
+7. Add GMAIL_CREDENTIALS_FILE_PATH to .env
 
-### Step 2: Generate an OAuth Token
-
-Use the standalone utility to get an OAuth token:
-
-```bash
-poetry run python messaging_manager/libs/gmail_oauth_utils.py --credentials  path/to/credentials.json
-```
-
-This will:
-1. Open a browser window asking you to sign in to your Google account
-2. Request permission to access your Gmail account (you may have to bypass safty check)
-3. After you grant permission, generate and display an OAuth token
-
-The token will be printed to the console, which you can copy for use in your `.env` file.
